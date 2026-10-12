@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#16584d">
+  <meta name="description" content="A private, local workspace for grading text against your own rubric.">
+  <title>Margin · Local rubric grader</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Margin home"><span class="brand-mark" aria-hidden="true">m<span>·</span></span><span>margin<span class="brand-subtitle">LOCAL RUBRIC GRADER</span></span></a>
+    <div class="header-right"><span class="privacy-badge"><span class="status-dot" aria-hidden="true"></span>On your machine</span><a class="text-link" href="#model-settings">Model settings <span aria-hidden="true">↗</span></a></div>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <div><p class="eyebrow">YOUR RUBRIC. YOUR JUDGMENT.</p><h1 id="page-title">Make room for<br><em>thoughtful grading.</em></h1><p class="intro-copy">Turn your criteria into a consistent first pass.<br>Read, review, and keep the final decision yours.</p></div>
+      <aside class="privacy-note"><span class="note-icon" aria-hidden="true">⌁</span><p><strong>A little more private.</strong>Your text and rubric stay on this computer. Grading uses local decision models; images are ignored.</p><span class="note-foot">NO CLOUD INFERENCE · NO ACCOUNT</span></aside>
+    </section>
+
+    <details id="model-settings" class="settings-panel">
+      <summary><span class="settings-title"><span aria-hidden="true">⚙</span> Model workspace <span id="provider-summary" class="muted">Loading settings…</span></span><span class="settings-action">Configure <span aria-hidden="true">⌄</span></span></summary>
+      <div class="settings-content model-workspace-content">
+        <div class="workspace-config-header"><div><h3>Model workspace</h3><p class="field-help">Choose up to eight local decision models. Enable the ones to grade with, and arrange their display order.</p></div><a class="text-link" href="/setup" target="_blank" rel="noopener">Local setup guide ↗</a></div>
+        <section class="model-picker" aria-labelledby="model-picker-label">
+          <label id="model-picker-label" for="model-search">Find a local decision model</label>
+          <input id="model-search" type="search" placeholder="Search local presets or your configured model names…" aria-controls="model-search-results" autocomplete="off">
+          <p class="field-help">Search stays on this computer. This lists bundled presets and your current custom connections, not an online model catalog.</p>
+          <div id="model-search-results" class="model-search-results" aria-label="Matching local models"></div>
+          <button id="add-custom-model" class="button button-secondary" type="button">＋ Custom local server</button>
+        </section>
+        <div class="section-label"><h3>Configured models</h3><span id="model-count" class="muted">0 / 8 configured</span></div>
+        <div id="model-list" class="model-config-grid"></div>
+        <div class="workspace-config-actions toolbar"><button id="save-workspace" class="button button-secondary" type="button">Save workspace</button><button id="load-workspace" class="small-button" type="button">Load saved</button><button id="export-workspace" class="small-button" type="button">Export configuration</button><button id="import-workspace" class="small-button" type="button">Import configuration</button><input id="workspace-file" type="file" accept=".json,application/json" hidden></div>
+        <p class="field-help workspace-privacy">Save, import, and export include only model and explanation settings. Rubric content, assignment details, instructor guidance, student text, grades, and notes are excluded. Nothing is saved automatically.</p>
+        <p id="workspace-status" class="inline-status" role="status" aria-live="polite"></p>
+        <details class="local-services" open>
+          <summary>Bundled local servers</summary>
+          <p class="field-help">Start or stop the bundled servers here. Laya runs inside this app. Custom servers and services started in another terminal must be managed there.</p>
+          <div id="runtime-list" class="runtime-list"></div>
+          <button id="refresh-runtimes" class="small-button" type="button">Refresh server status</button>
+          <p id="runtime-status" class="inline-status" role="status" aria-live="polite"></p>
+        </details>
+        <div class="settings-bottom"><p class="field-help">Check enabled models before grading. Checks run one at a time; the first model load can take longer.</p><button id="probe-model" class="button button-secondary" type="button">Check enabled models ↗</button></div>
+        <button id="forget-workspace" class="text-button forget-button" type="button">Clear this page, start a blank rubric, and restore model defaults</button>
+        <p id="model-status" class="inline-status" role="status" aria-live="polite"></p>
+      </div>
+    </details>
+
+    <details id="explanation-settings" class="settings-panel">
+      <summary><span class="settings-title">Local explanation review <span class="muted">Ollama · local only</span></span><span class="settings-action">Configure <span aria-hidden="true">⌄</span></span></summary>
+      <div class="settings-content">
+        <div class="field"><label class="explanation-toggle" for="explanation-enabled"><input id="explanation-enabled" type="checkbox" checked> Review disagreements and unanimous deductions</label><p class="field-help">Runs after grading when at least two enabled models all return assigned levels and either disagree or agree below full credit. The local model explains a shared deduction or suggests the best-fit existing rubric level for a disagreement. This advice never changes model or instructor scores.</p></div>
+        <div class="field"><label for="explanation-model">Installed Ollama model</label><input id="explanation-model" type="text" value="qwen38-27b:q4_k_m" placeholder="qwen38-27b:q4_k_m" spellcheck="false"><p class="field-help">Uses the dedicated local Ollama service at http://127.0.0.1:11435. No downloads or remote fallback. Explanations can take longer than grading and appear as they finish. <a href="/setup#ollama" target="_blank" rel="noopener">Local explanation setup</a>.</p></div>
+      </div>
+    </details>
+
+    <div id="global-status" class="global-status" role="status" aria-live="polite" hidden></div>
+    <section class="panel assignment-panel" aria-labelledby="assignment-heading">
+      <div class="assignment-intro"><p class="step-label">SHARED CONTEXT</p><h2 id="assignment-heading">The assignment</h2><p class="panel-description">Give all models the same task context.<br>Kept when you move to the next student.</p></div>
+      <div class="assignment-fields">
+        <div class="field"><label for="assignment-details">Assignment details <span class="optional">optional</span></label><textarea id="assignment-details" rows="5" aria-describedby="assignment-help" placeholder="Paste the assignment prompt, required content, constraints, or reference context here…"></textarea><p id="assignment-help" class="field-help">All models receive these details separately from your rubric. Nothing is saved automatically.</p></div>
+        <details class="grading-guidance-editor">
+          <summary>Instructor grading guidance <span class="optional">optional · editable</span></summary>
+          <div class="field"><label for="grading-guidance">Guidance sent to all models</label><textarea id="grading-guidance" rows="5" maxlength="12000" aria-describedby="grading-guidance-help" placeholder="Add optional instructions for interpreting your rubric…"></textarea><p id="grading-guidance-help" class="field-help">Add any additional instructions for applying your rubric, or leave this blank. The listed levels and points remain unchanged. Your guidance stays active when collapsed and is kept for the next student.</p></div>
+        </details>
+      </div>
+    </section>
+    <div id="workspace" class="workspace">
+      <section class="panel rubric-panel" aria-labelledby="rubric-heading">
+        <div class="panel-header"><div><p class="step-label">01 / DEFINE</p><h2 id="rubric-heading">The rubric</h2></div><span id="rubric-total" class="point-pill">— points</span></div>
+        <p class="panel-description">Set the standards. Each criterion gets one of the levels you define.</p>
+        <div class="toolbar"><button id="import-rubric" class="small-button" type="button"><span aria-hidden="true">↥</span> Import rubric</button><button id="export-rubric" class="small-button" type="button"><span aria-hidden="true">↧</span> Export JSON</button><input id="rubric-file" type="file" accept=".json,.txt,.pdf,.docx" hidden></div>
+        <div class="field"><label for="rubric-title">Rubric title</label><input id="rubric-title" type="text" placeholder="Name your rubric"></div>
+        <div class="field"><label for="rubric-instructions">Rubric guidance</label><textarea id="rubric-instructions" rows="4" placeholder="Add scoring rules, grading guidance, or the text of an imported rubric."></textarea><p class="field-help">Document imports fill this field. Define the scored criteria and levels below.</p></div>
+        <div class="section-label"><h3>Scored criteria</h3><span id="criteria-count" class="muted">0 criteria</span></div>
+        <div id="rubric-empty" class="rubric-empty"><h3>Start with your rubric.</h3><p>Choose <strong>Add a criterion</strong> to define what to assess and its scoring levels, or use <strong>Import rubric</strong> to load your rubric JSON. Give your rubric a title before grading.</p></div>
+        <div id="criteria-editor" class="criteria-editor"></div>
+        <button id="add-criterion" class="add-button" type="button"><span aria-hidden="true">＋</span> Add a criterion</button>
+      </section>
+
+      <section class="panel submission-panel" aria-labelledby="submission-heading">
+        <div class="panel-header"><div><p class="step-label">02 / READ</p><h2 id="submission-heading">The submission</h2></div><span class="text-only-label">TEXT ONLY</span></div>
+        <p class="panel-description">Paste the work, or extract text from a document.</p>
+        <label id="submission-drop" class="upload-zone" for="submission-file"><span class="upload-icon" aria-hidden="true">↥</span><span><strong>Choose a document <span>or drop it here</span></strong><small>TXT, PDF, or Word (.docx) · images ignored</small></span><input id="submission-file" type="file" accept=".txt,.pdf,.docx" class="file-input"></label>
+        <div class="submission-meta"><label for="submission-name">Submission name <span class="optional">optional</span></label><input id="submission-name" type="text" placeholder="e.g. Essay — draft 01" maxlength="250"></div>
+        <div class="text-editor-header"><label for="submission-text">Text to grade</label><span class="editor-actions"><button id="clear-submission" class="text-button" type="button" title="Clear this submission and its grade while keeping your rubric, assignment details, and instructor guidance">Next student</button></span></div>
+        <textarea id="submission-text" class="submission-text" spellcheck="false" placeholder="Paste your submission here…&#10;&#10;Imported text appears here, ready for you to check and edit before grading."></textarea>
+        <div class="text-editor-footer"><span id="word-count">0 words</span><span id="char-count">0 / 24,000 characters</span></div>
+        <div id="extraction-warnings" class="notice" role="status" hidden></div>
+        <div class="grading-footer"><p><span aria-hidden="true">✧</span> <span id="grading-model-count">Selected local models. One submission.</span><br><span class="muted">Compare decisions, then confirm your own scores.</span></p><button id="grade-button" class="button button-primary" type="button"><span id="grade-button-label">Grade with selected models</span><span id="grade-button-icon" aria-hidden="true">→</span></button></div>
+        <p id="grading-status" class="inline-status" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+
+    <section id="results-section" class="results-section" aria-labelledby="results-heading">
+      <div class="results-title"><div><p class="step-label">03 / COMPARE &amp; REVIEW</p><h2 id="results-heading">Model perspectives. Your decision.</h2></div><div id="result-actions" class="toolbar" hidden><button id="export-result-json" class="small-button" type="button">Export JSON <span aria-hidden="true">↧</span></button><button id="export-result-csv" class="small-button" type="button">Export CSV <span aria-hidden="true">↧</span></button></div></div>
+      <div id="results-empty" class="results-empty"><span aria-hidden="true" class="empty-symbol">≋</span><div><h3>A starting point for your review.</h3><p>See all models' scores and disagreements here. Confirm your own scores<br class="desktop-break"> and add review notes. Agreement does not establish fairness or accuracy.</p></div><span class="empty-label">READY WHEN YOU ARE</span></div>
+      <div id="results-content" hidden></div>
+    </section>
+    <footer class="site-footer"><span>margin <span class="footer-dot">·</span> Local by design.</span><p>Model probabilities are not verified accuracy. Always review grades before use.</p></footer>
+  </main>
+</body>
+</html>

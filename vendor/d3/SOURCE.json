@@ -1,0 +1,14 @@
+{
+  "repo_id": "vllm-sr/d3-mini",
+  "revision": "a475367de0d8133a3c1a2a0dc12303d89cfa2ab4",
+  "source_url": "https://huggingface.co/vllm-sr/d3-mini/tree/a475367de0d8133a3c1a2a0dc12303d89cfa2ab4",
+  "license": "Apache-2.0",
+  "files_sha256": {
+    "d3_runtime.py": "6c049aa7d3da8da3738602a2812572879d0a47b03c28c3e33f36d7300257de89",
+    "d3_format.py": "187a0f359f6f89a844e723377769556f78133b118851e702e4b0fe5123ccb0f1",
+    "d3_fast.py": "68a1fb9a2c3bde9ac2763bf504decae592ca12722698fbde1b39a31262955535",
+    "d3_kernels.py": "8f7534ca1e1846ebf7c4c73058002f3be4dbf0d5d426f0815150ae0cbe7677bd",
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "NOTICE": "1b1c0d9508ca9703a5f7eabfc70800676e167ad1de1e72ac69f4b9cab1b9272b"
+  }
+}

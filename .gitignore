@@ -1,0 +1,45 @@
+# Installed runtimes and weights
+.venv/
+.venv-*/
+venv/
+models/
+*.gguf
+*.safetensors
+node_modules/
+
+# Local model configuration and private working files
+config/
+.env
+.env.*
+!.env.example
+private/
+/history/
+/work/
+/evaluation/
+/examples/
+/uploads/
+*.pem
+*.key
+submissions/
+student-data/
+exports/
+results/
+*-grade.json
+*-grade.csv
+*-rubric.json
+margin-model-workspace.json
+*.pdf
+*.doc
+*.docx
+
+# Generated caches, logs, and editor files
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.py[cod]
+*.log
+.DS_Store
+.idea/
+.vscode/
