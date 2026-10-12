@@ -1,6 +1,8 @@
-# Optional dependencies for the pinned StartLux and Decision 3.0 local trials.
-# Install the main app and Laya dependencies first. No CUDA-only kernels on Mac.
+# Optional dependencies for the pinned StartLux and Decision 3.0 local models.
+# Install the main app first. Includes the CLI for the pinned model downloads.
+# No CUDA-only kernels on Mac.
 torch==2.14.0
 transformers==5.17.0
 accelerate==1.15.0
+huggingface_hub==1.33.0
 httpx==0.28.1

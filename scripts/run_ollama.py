@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Run a separate, quiet Ollama daemon for local DeepSeek explanations.
+"""Run a separate, quiet Ollama daemon with a project-local model store.
 
-Reads the already-installed model cache. Copies its selected immutable model
-files with macOS clonefile (APFS copy-on-write); never downloads model files.
-The existing Ollama application, its model cache, and HOME stay unchanged.
+Starts with an empty store on a fresh clone; never downloads model files.
+Import separately downloaded, verified GGUFs with import_explanation_candidate.py.
+Ollama may initialize its standard local identity on first use; no account or
+pre-existing model cache is required. The personal model store is not used.
 """
 from __future__ import annotations
 
 import argparse
-import ctypes
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,12 +21,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_NAME = "deepseek-r1:70b"
-MANIFEST = Path("manifests/registry.ollama.ai/library/deepseek-r1/70b")
-MANIFEST_SHA256 = "d37b54d01a76512a5adbaa9da4ee1c00833bf2dfefb0d4cc54351ba529e0f4da"
 TESTED_VERSION = "0.40.3"
 PORT = 11435
 MAX_METADATA_BYTES = 65536
@@ -62,77 +57,36 @@ def offline_environment(model_cache: Path, inherited=None):
     return environment
 
 
-def clone_model_file(source: Path, destination: Path):
-    """Independent APFS file contents, not hardlinks into the user's cache."""
-    if sys.platform != "darwin":
-        raise LaunchError("This launcher requires macOS copy-on-write file cloning; no large file copy was attempted.")
-    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-    clonefile = library.clonefile
-    clonefile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
-    clonefile.restype = ctypes.c_int
-    if clonefile(os.fsencode(source), os.fsencode(destination), 0) != 0:
-        raise LaunchError("Could not clone the cached model. Use a project and source cache on a compatible APFS volume; no download or full-size copy was attempted.")
-    destination.chmod(0o600)
-
-
-def prepare_model_cache(source: Path, destination: Path):
-    source, destination = source.expanduser().resolve(), destination.expanduser().resolve()
-    if (source == destination or source in destination.parents or destination in source.parents):
-        raise LaunchError("Use a separate project cache, outside the existing Ollama model cache.")
+def copy_model_file(source: Path, destination: Path):
+    """Make an independent copy on any supported filesystem, never a hardlink."""
+    # Called only after checksum verification, during explicit model import.
+    # Refuse replacement so an interrupted/parallel import cannot lose data.
     try:
-        manifest_bytes = (source / MANIFEST).read_bytes()
-        if hashlib.sha256(manifest_bytes).hexdigest() != MANIFEST_SHA256:
-            raise LaunchError("The cached deepseek-r1:70b manifest does not match the locally verified release. No model was started or downloaded.")
-        manifest = json.loads(manifest_bytes)
-        descriptors = [manifest["config"], *manifest["layers"]]
-        files = []
-        for descriptor in descriptors:
-            digest, size = descriptor["digest"], descriptor["size"]
-            if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or type(size) is not int or size <= 0:
-                raise LaunchError("The cached model manifest is invalid.")
-            relative = Path("blobs") / digest.replace(":", "-")
-            item = source / relative
-            if not item.is_file() or item.stat().st_size != size:
-                raise LaunchError("The existing DeepSeek cache is incomplete. This launcher never downloads missing files.")
-            files.append((relative, size))
-        # All source preflight checks finish before any cache is created.
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output, length=8 * 1024 * 1024)
+    except Exception:
+        raise LaunchError("Could not copy the verified model into the project store. Check free disk space and project permissions.") from None
+
+
+def prepare_model_cache(destination: Path):
+    """Create an empty private store without inspecting any personal settings."""
+    destination = destination.expanduser().absolute()
+    paths = (destination, *destination.parents)
+    if ".." in destination.parts or ROOT not in destination.parents or any(
+            path.is_symlink() for path in paths if path == ROOT or ROOT in path.parents):
+        raise LaunchError("Use a model cache inside this project, without symbolic links.")
+    try:
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for relative, size in files:
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if target.exists() or target.is_symlink():
-                if target.is_symlink() or not target.is_file() or target.stat().st_size != size:
-                    raise LaunchError("The project model cache contains an unexpected file. Use a new project cache directory.")
-                continue
-            temporary = target.with_name(target.name + ".clone-" + uuid.uuid4().hex)
-            try:
-                clone_model_file(source / relative, temporary)
-                if temporary.stat().st_size != size:
-                    raise LaunchError("The project model clone is incomplete.")
-                temporary.rename(target)
-            finally:
-                temporary.unlink(missing_ok=True)
-        target = destination / MANIFEST
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if target.exists() or target.is_symlink():
-            if target.is_symlink() or target.read_bytes() != manifest_bytes:
-                raise LaunchError("The project model manifest differs from the verified release. Use a new project cache directory.")
-        else:
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(manifest_bytes)
-        return destination
+        blobs = destination / "blobs"
+        if blobs.is_symlink():
+            raise LaunchError("The project blob store must not be a symbolic link.")
+        blobs.mkdir(exist_ok=True, mode=0o700)
     except LaunchError:
         raise
-    except Exception:
-        raise LaunchError("Could not prepare the private model cache. Check the local source cache and project permissions.") from None
-
-
-def check_existing_key():
-    # `ollama serve` generates keys in HOME when none exist. Do not trigger that
-    # write or read the key itself; this project uses an existing installation.
-    if not (Path.home() / ".ollama/id_ed25519").is_file():
-        raise LaunchError("Ollama's existing installation key is absent. Initialize Ollama separately before using this launcher; no files were written in your home directory.")
+    except OSError:
+        raise LaunchError("Could not prepare the project model store. Check project permissions.") from None
+    return destination
 
 
 def check_port():
@@ -189,6 +143,13 @@ def wait_ready(process, timeout=45):
                 metadata = json.loads(raw)
                 if metadata.get("version") != TESTED_VERSION:
                     raise LaunchError("The dedicated daemon does not match the verified Ollama version.")
+                with client.open(f"http://127.0.0.1:{PORT}/api/status", timeout=1) as status:
+                    raw_status = status.read(MAX_METADATA_BYTES + 1)
+                    if status.status != 200 or len(raw_status) > MAX_METADATA_BYTES:
+                        raise LaunchError("The dedicated Ollama endpoint returned invalid metadata.")
+                    cloud = json.loads(raw_status).get("cloud", {})
+                    if cloud.get("disabled") is not True or cloud.get("source") not in ("env", "both"):
+                        raise LaunchError("The dedicated daemon did not confirm OLLAMA_NO_CLOUD=1.")
                 if process.poll() is not None:
                     raise LaunchError("The dedicated Ollama process stopped during startup.")
                 return
@@ -219,26 +180,21 @@ def stop_owned(process):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ollama", type=Path, help="Existing Ollama 0.40.3 executable.")
-    parser.add_argument("--source-models", type=Path, default=Path.home() / ".ollama/models",
-                        help="Existing cache read only as the source; never downloaded into or pruned.")
     parser.add_argument("--model-cache", type=Path, default=ROOT / "models/ollama-explanations",
-                        help="Separate project cache populated with APFS clones of the selected model.")
+                        help="Project-local model store; starts empty until a model is imported.")
     args = parser.parse_args(argv)
     process = None
     try:
-        check_existing_key()
         check_port()
         binary = find_binary(args.ollama)
-        environment = offline_environment(args.model_cache.expanduser().resolve())
-        check_version(binary, environment)
-        print("Preparing the local DeepSeek cache with APFS clones; no model downloads.", flush=True)
-        cache = prepare_model_cache(args.source_models, args.model_cache)
+        cache = prepare_model_cache(args.model_cache)
         environment = offline_environment(cache)
+        check_version(binary, environment)
         process = subprocess.Popen([str(binary), "serve"], env=environment,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, start_new_session=True)
         wait_ready(process)
-        print("Local DeepSeek explanations are ready at http://127.0.0.1:11435. Cloud access and request/runtime logs are disabled. Ctrl-C stops this daemon.", flush=True)
+        print("Local explanation daemon is ready at http://127.0.0.1:11435. Cloud access and request/runtime logs are disabled. Import a verified model separately if the store is empty. Ctrl-C stops this daemon.", flush=True)
         process.wait()
         raise LaunchError("The dedicated Ollama daemon stopped. No explanation was fabricated.")
     except KeyboardInterrupt:

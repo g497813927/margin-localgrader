@@ -1,14 +1,10 @@
 """Launcher privacy checks using synthetic files; never loads a model."""
-import hashlib
 import errno
 import importlib.util
 import json
-import os
 from pathlib import Path
-import shutil
 import socket
 import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -18,25 +14,6 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run_ollama.py"
 spec = importlib.util.spec_from_file_location("margin_ollama_launcher", SCRIPT)
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
-
-
-def fixture_cache(tmp_path, monkeypatch):
-    source = tmp_path / "source"
-    source.mkdir()
-    blobs = source / "blobs"
-    blobs.mkdir()
-    parts = []
-    for content in (b'{"model_format":"gguf"}', b"GGUF synthetic weights"):
-        digest = hashlib.sha256(content).hexdigest()
-        (blobs / ("sha256-" + digest)).write_bytes(content)
-        parts.append({"digest": "sha256:" + digest, "size": len(content)})
-    raw = json.dumps({"config": parts[0], "layers": [parts[1]]}).encode()
-    target = source / launcher.MANIFEST
-    target.parent.mkdir(parents=True)
-    target.write_bytes(raw)
-    monkeypatch.setattr(launcher, "MANIFEST_SHA256", hashlib.sha256(raw).hexdigest())
-    monkeypatch.setattr(launcher, "clone_model_file", shutil.copyfile)
-    return source, tmp_path / "private", parts
 
 
 def test_offline_environment_removes_inherited_cloud_debug_proxy_and_native_trace(tmp_path):
@@ -87,72 +64,41 @@ def test_port_preflight_rejects_active_listener_without_reuse_port(monkeypatch):
             launcher.check_port()
 
 
-def test_cache_only_copies_selected_verified_manifest_and_preserves_source(tmp_path, monkeypatch):
-    source, destination, parts = fixture_cache(tmp_path, monkeypatch)
-    unrelated = source / "blobs/unrelated-model"
-    unrelated.write_text("Do not copy")
-    before = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
-    assert launcher.prepare_model_cache(source, destination) == destination
-    after = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
-    assert before == after
-    assert not (destination / "blobs/unrelated-model").exists()
-    assert (destination / launcher.MANIFEST).read_bytes() == (source / launcher.MANIFEST).read_bytes()
-    assert len(list((destination / "blobs").iterdir())) == 2
-    for part in parts:
-        name = part["digest"].replace(":", "-")
-        assert (source / "blobs" / name).stat().st_ino != (destination / "blobs" / name).stat().st_ino
-
-
-def test_second_setup_reuses_existing_project_clones(tmp_path, monkeypatch):
-    source, destination, _ = fixture_cache(tmp_path, monkeypatch)
-    launcher.prepare_model_cache(source, destination)
-    monkeypatch.setattr(launcher, "clone_model_file", lambda *args: pytest.fail("Existing files must not be recloned"))
-    launcher.prepare_model_cache(source, destination)
-
-
-def test_wrong_manifest_stops_before_creating_cache(tmp_path, monkeypatch):
-    source, destination, _ = fixture_cache(tmp_path, monkeypatch)
-    monkeypatch.setattr(launcher, "MANIFEST_SHA256", "0" * 64)
-    with pytest.raises(launcher.LaunchError, match="manifest does not match"):
-        launcher.prepare_model_cache(source, destination)
-    assert not destination.exists()
-
-
-def test_incomplete_source_stops_before_creating_cache(tmp_path, monkeypatch):
-    source, destination, parts = fixture_cache(tmp_path, monkeypatch)
-    (source / "blobs" / parts[-1]["digest"].replace(":", "-")).unlink()
-    with pytest.raises(launcher.LaunchError, match="incomplete"):
-        launcher.prepare_model_cache(source, destination)
-    assert not destination.exists()
-
-
-@pytest.mark.parametrize("relative", ["same", "nested", "parent"])
-def test_original_cache_cannot_be_destination(tmp_path, monkeypatch, relative):
-    source, destination, _ = fixture_cache(tmp_path, monkeypatch)
-    destination = {"same": source, "nested": source / "private", "parent": tmp_path}[relative]
-    with pytest.raises(launcher.LaunchError, match="separate project cache"):
-        launcher.prepare_model_cache(source, destination)
-
-
-def test_destination_blob_symlink_rejected_without_touching_source(tmp_path, monkeypatch):
-    source, destination, parts = fixture_cache(tmp_path, monkeypatch)
-    (destination / "blobs").mkdir(parents=True)
-    name = parts[0]["digest"].replace(":", "-")
-    target = destination / "blobs" / name
-    target.symlink_to(source / "blobs" / name)
-    with pytest.raises(launcher.LaunchError, match="unexpected file"):
-        launcher.prepare_model_cache(source, destination)
-    assert target.is_symlink()
-
-
-def test_existing_key_check_never_creates_or_reads_key(tmp_path, monkeypatch):
-    monkeypatch.setattr(launcher.Path, "home", classmethod(lambda cls: tmp_path))
-    with pytest.raises(launcher.LaunchError, match="key is absent"):
-        launcher.check_existing_key()
+def test_fresh_clone_prepares_empty_store_without_personal_key_or_models(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "ROOT", tmp_path)
+    monkeypatch.setattr(launcher.Path, "home", classmethod(lambda cls: pytest.fail("No personal files inspected")))
+    destination = tmp_path / "models/ollama-explanations"
+    assert launcher.prepare_model_cache(destination) == destination
+    assert list(destination.iterdir()) == [destination / "blobs"]
+    assert list((destination / "blobs").iterdir()) == []
     assert not (tmp_path / ".ollama").exists()
-    (tmp_path / ".ollama").mkdir()
-    (tmp_path / ".ollama/id_ed25519").write_bytes(b"synthetic key not read")
-    launcher.check_existing_key()
+    launcher.prepare_model_cache(destination)
+
+
+@pytest.mark.parametrize("outside", ["../private", "models/../../private"])
+def test_cache_cannot_escape_project(tmp_path, monkeypatch, outside):
+    monkeypatch.setattr(launcher, "ROOT", tmp_path)
+    with pytest.raises(launcher.LaunchError, match="inside this project"):
+        launcher.prepare_model_cache(tmp_path / outside)
+
+
+@pytest.mark.parametrize("link_at", ["cache", "parent", "blobs"])
+def test_cache_links_are_rejected_without_writing_target(tmp_path, monkeypatch, link_at):
+    root, elsewhere = tmp_path / "project", tmp_path / "elsewhere"
+    root.mkdir(); elsewhere.mkdir()
+    monkeypatch.setattr(launcher, "ROOT", root)
+    destination = root / "models/ollama-explanations"
+    if link_at == "parent":
+        (root / "models").symlink_to(elsewhere)
+    else:
+        (root / "models").mkdir()
+        if link_at == "cache":
+            destination.symlink_to(elsewhere)
+        else:
+            destination.mkdir(); (destination / "blobs").symlink_to(elsewhere)
+    with pytest.raises(launcher.LaunchError, match="symbolic link"):
+        launcher.prepare_model_cache(destination)
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_version_check_accepts_client_output_without_daemon(tmp_path, monkeypatch):
@@ -177,11 +123,10 @@ def test_redirects_are_rejected():
         launcher.NoRedirect().redirect_request(None, None, None, None, None)
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS APFS cloning")
-def test_real_clone_of_tiny_synthetic_file_has_independent_contents(tmp_path):
+def test_portable_copy_of_tiny_synthetic_file_has_independent_contents(tmp_path):
     source, destination = tmp_path / "source.txt", tmp_path / "copy.txt"
     source.write_bytes(b"synthetic original")
-    launcher.clone_model_file(source, destination)
+    launcher.copy_model_file(source, destination)
     assert source.stat().st_ino != destination.stat().st_ino
     destination.write_bytes(b"synthetic changed")
     assert source.read_bytes() == b"synthetic original"
@@ -191,11 +136,10 @@ def test_real_clone_of_tiny_synthetic_file_has_independent_contents(tmp_path):
 def test_main_launches_only_owned_quiet_serve_process(tmp_path, monkeypatch):
     process = SimpleNamespace(pid=1234, wait=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
     stopped = []
-    monkeypatch.setattr(launcher, "check_existing_key", lambda: None)
     monkeypatch.setattr(launcher, "check_port", lambda: None)
     monkeypatch.setattr(launcher, "find_binary", lambda explicit: tmp_path / "ollama")
     monkeypatch.setattr(launcher, "check_version", lambda *args: None)
-    monkeypatch.setattr(launcher, "prepare_model_cache", lambda source, destination: destination)
+    monkeypatch.setattr(launcher, "ROOT", tmp_path)
     monkeypatch.setattr(launcher, "wait_ready", lambda owned: None)
     monkeypatch.setattr(launcher, "stop_owned", lambda owned: stopped.append(owned))
     def popen(command, **kwargs):
@@ -212,7 +156,40 @@ def test_main_launches_only_owned_quiet_serve_process(tmp_path, monkeypatch):
 def test_main_sanitizes_unexpected_error_and_does_not_start_daemon(monkeypatch, capsys):
     def fail():
         raise RuntimeError("PRIVATE_NATIVE_OUTPUT")
-    monkeypatch.setattr(launcher, "check_existing_key", fail)
+    monkeypatch.setattr(launcher, "check_port", fail)
     monkeypatch.setattr(launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("Must not launch"))
     assert launcher.main([]) == 1
     assert "PRIVATE_NATIVE_OUTPUT" not in capsys.readouterr().err
+
+
+def test_portable_copy_never_replaces_an_existing_file(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"new bytes"); destination.write_bytes(b"existing bytes")
+    with pytest.raises(launcher.LaunchError):
+        launcher.copy_model_file(source, destination)
+    assert destination.read_bytes() == b"existing bytes"
+
+
+@pytest.mark.parametrize("cloud, permitted", [
+    ({"disabled": True, "source": "env"}, True),
+    ({"disabled": True, "source": "both"}, True),
+    ({"disabled": False, "source": "none"}, False),
+    ({"disabled": True, "source": "config"}, False),
+])
+def test_ready_requires_cloud_disabled_by_environment(monkeypatch, cloud, permitted):
+    from io import BytesIO
+    routes = []
+    class Response(BytesIO):
+        status = 200
+    def open_url(url, timeout):
+        routes.append(url)
+        value = {"version": launcher.TESTED_VERSION} if url.endswith("/version") else {"cloud": cloud}
+        return Response(json.dumps(value).encode())
+    monkeypatch.setattr(launcher.urllib.request, "build_opener", lambda *a: SimpleNamespace(open=open_url))
+    process = SimpleNamespace(poll=lambda: None)
+    if permitted:
+        launcher.wait_ready(process)
+    else:
+        with pytest.raises(launcher.LaunchError, match="OLLAMA_NO_CLOUD"):
+            launcher.wait_ready(process)
+    assert routes == ["http://127.0.0.1:11435/api/version", "http://127.0.0.1:11435/api/status"]

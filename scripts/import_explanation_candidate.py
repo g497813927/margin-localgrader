@@ -23,9 +23,7 @@ import uuid
 import httpx
 
 from run_explanation_candidate import CANDIDATES, ROOT, verify_model
-from run_ollama import (PORT, TESTED_VERSION, clone_model_file,
-                        MODEL_NAME as BASELINE_NAME, MANIFEST as BASELINE_MANIFEST,
-                        MANIFEST_SHA256 as BASELINE_MANIFEST_SHA256)
+from run_ollama import PORT, TESTED_VERSION, copy_model_file
 
 ENDPOINT = f"http://127.0.0.1:{PORT}"
 CACHE = ROOT / "models/ollama-explanations"
@@ -117,33 +115,28 @@ def tags(client):
 
 
 def verify_daemon_cache(client):
-    """Bind the server's reported blob location to the launcher's pinned cache.
+    """Prove this loopback daemon sees the project store before model mutation.
 
-    A matching candidate digest alone is insufficient: another local cache may
-    already contain the same public weights. The launcher always installs this
-    exact R1 baseline, whose generated FROM path identifies the server's store.
+    A fresh random content-addressed probe exists only in this store. The HEAD
+    request cannot import or download anything. Remove the probe on all paths;
+    no baseline model or personal installation state is needed.
     """
-    raw = checked_bytes(CACHE / BASELINE_MANIFEST)
-    if hashlib.sha256(raw).hexdigest() != BASELINE_MANIFEST_SHA256:
-        raise ImportError("The project baseline manifest does not match the dedicated launcher.")
+    nonce = os.urandom(32)
+    digest = hashlib.sha256(nonce).hexdigest()
+    probe = CACHE / "blobs" / ("sha256-" + digest)
+    no_links(probe)
+    descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        manifest = json.loads(raw)
-        layers = [layer for layer in manifest["layers"] if layer["mediaType"] == "application/vnd.ollama.image.model"]
-        if len(layers) != 1 or not re.fullmatch(r"sha256:[a-f0-9]{64}", layers[0]["digest"]):
-            raise ValueError
-        expected = CACHE / "blobs" / layers[0]["digest"].replace(":", "-")
-        no_links(expected)
-        if not expected.is_file() or expected.stat().st_size != layers[0]["size"]:
-            raise ValueError
-    except (KeyError, TypeError, ValueError):
-        raise ImportError("The dedicated launcher's baseline cache is incomplete or invalid.") from None
-    shown = metadata(client, "POST", "/api/show", {"model": BASELINE_NAME})
-    modelfile = shown.get("modelfile")
-    if not isinstance(modelfile, str) or shown.get("remote_host") or shown.get("remote_model"):
-        raise ImportError("The daemon did not confirm the project's local baseline model.")
-    origins = [line[5:].strip() for line in modelfile.splitlines() if line.startswith("FROM ")]
-    if len(origins) != 1 or origins[0] not in (str(expected), '"' + str(expected) + '"'):
-        raise ImportError("The daemon uses a different model cache. No model was imported or modified.")
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(nonce)
+        try:
+            response = client.head(ENDPOINT + "/api/blobs/sha256:" + digest)
+        except httpx.HTTPError:
+            raise ImportError("Could not verify the dedicated daemon's project store. No model was imported.") from None
+        if response.status_code != 200:
+            raise ImportError("The daemon uses a different model cache. No model was imported or modified.")
+    finally:
+        probe.unlink(missing_ok=True)
 
 
 def manifest_paths(name):
@@ -261,9 +254,9 @@ def import_candidate(candidate, *, client=None):
             if blob.exists() or blob.is_symlink():
                 verify_blob(blob, spec)
             else:
-                temporary = blob.with_name(blob.name + ".clone-" + uuid.uuid4().hex)
+                temporary = blob.with_name(blob.name + ".copy-" + uuid.uuid4().hex)
                 try:
-                    clone_model_file(source, temporary)
+                    copy_model_file(source, temporary)
                     verify_blob(temporary, spec)
                     os.link(temporary, blob)  # Atomic, never replaces an existing blob.
                 finally:

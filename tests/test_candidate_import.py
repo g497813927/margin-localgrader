@@ -26,17 +26,8 @@ def prepared(tmp_path, monkeypatch):
     monkeypatch.setattr(importer, "CACHE", cache)
     monkeypatch.setattr(importer, "CANDIDATES", {key: spec for key in importer.MODEL_NAMES})
     monkeypatch.setattr(importer, "verify_model", lambda candidate: verified.append(candidate) or source)
-    monkeypatch.setattr(importer, "clone_model_file", shutil.copyfile)
-    baseline = b"public synthetic baseline"
-    baseline_digest = hashlib.sha256(baseline).hexdigest()
-    baseline_blob = cache / "blobs" / ("sha256-" + baseline_digest)
-    baseline_blob.write_bytes(baseline)
-    baseline_manifest = json.dumps({"layers": [{"mediaType": "application/vnd.ollama.image.model", "digest": "sha256:" + baseline_digest, "size": len(baseline)}]}).encode()
-    baseline_path = cache / importer.BASELINE_MANIFEST
-    baseline_path.parent.mkdir(parents=True)
-    baseline_path.write_bytes(baseline_manifest)
-    monkeypatch.setattr(importer, "BASELINE_MANIFEST_SHA256", hashlib.sha256(baseline_manifest).hexdigest())
-    return {"root": tmp_path, "cache": cache, "source": source, "data": data, "spec": spec, "verified": verified, "baseline_blob": baseline_blob}
+    monkeypatch.setattr(importer, "copy_model_file", shutil.copyfile)
+    return {"root": tmp_path, "cache": cache, "source": source, "data": data, "spec": spec, "verified": verified}
 
 
 def store_metadata(prepared, value):
@@ -68,7 +59,7 @@ def store_model(prepared, name, *, wrong_weights=False, extra_layer=False, conte
 
 @contextmanager
 def server(prepared, *, candidate="qwen38_4b", existing=None, version="0.40.3", cloud=None,
-           show_changes=None, route_override=None, create_success=True, baseline_from=None):
+           show_changes=None, route_override=None, create_success=True, wrong_cache=False):
     name = importer.MODEL_NAMES[candidate]
     models = [existing] if existing else []
     requests = []
@@ -87,7 +78,7 @@ def server(prepared, *, candidate="qwen38_4b", existing=None, version="0.40.3", 
         if route.startswith("/api/blobs/"):
             assert request.method == "HEAD"
             blob = prepared["cache"] / "blobs" / route.rsplit("/", 1)[1].replace(":", "-")
-            return httpx.Response(200 if blob.is_file() else 404)
+            return httpx.Response(200 if blob.is_file() and not wrong_cache else 404)
         if route == "/api/create":
             payload = json.loads(request.content)
             assert payload == {"model": name, "files": {prepared["source"].name: "sha256:" + prepared["spec"]["sha256"]}, "parameters": {"num_ctx": 16384}, "stream": False}
@@ -96,8 +87,6 @@ def server(prepared, *, candidate="qwen38_4b", existing=None, version="0.40.3", 
                 models.append(store_model(prepared, name))
             return httpx.Response(200, json={"status": "success" if create_success else "incomplete"})
         if route == "/api/show":
-            if json.loads(request.content) == {"model": importer.BASELINE_NAME}:
-                return httpx.Response(200, json={"modelfile": "FROM " + (baseline_from or str(prepared["baseline_blob"])) + "\n"})
             assert json.loads(request.content) == {"model": name}
             quantization = "Q4_K_M" if candidate == "qwen36" else name.split(":")[1].upper()
             family = "qwen35moe" if candidate == "qwen36" else "qwen35"
@@ -145,7 +134,7 @@ def test_existing_import_is_verified_without_recreation_or_clone(prepared, monke
     existing = store_model(prepared, name)
     if bare_digest:
         existing["digest"] = existing["digest"].removeprefix("sha256:")
-    monkeypatch.setattr(importer, "clone_model_file", lambda *args: pytest.fail("No duplicate clone"))
+    monkeypatch.setattr(importer, "copy_model_file", lambda *args: pytest.fail("No duplicate clone"))
     with server(prepared, existing=existing) as (client, requests):
         result = importer.import_candidate("qwen38_4b", client=client)
     assert result["model"] == name
@@ -174,7 +163,7 @@ def test_requires_daemon_cloud_disabled_by_environment_before_writes(prepared, c
     with server(prepared, cloud=cloud) as (client, requests):
         with pytest.raises(importer.ImportError, match="OLLAMA_NO_CLOUD"):
             importer.import_candidate("qwen38_4b", client=client)
-    assert list((prepared["cache"] / "blobs").iterdir()) == [prepared["baseline_blob"]]
+    assert list((prepared["cache"] / "blobs").iterdir()) == []
     assert not any(r.method == "POST" for r in requests)
 
 
@@ -214,19 +203,23 @@ def test_unknown_local_manifest_is_left_untouched(prepared):
 
 def test_wrong_daemon_cache_rejected_before_any_import_write(prepared):
     before = sorted(str(p.relative_to(prepared["cache"])) for p in prepared["cache"].rglob("*"))
-    with server(prepared, baseline_from="/different/personal/cache/blobs/sha256-public") as (client, requests):
+    with server(prepared, wrong_cache=True) as (client, requests):
         with pytest.raises(importer.ImportError, match="different model cache"):
             importer.import_candidate("qwen38_4b", client=client)
     assert before == sorted(str(p.relative_to(prepared["cache"])) for p in prepared["cache"].rglob("*"))
-    assert not any(r.url.path == "/api/create" or r.method == "HEAD" for r in requests)
+    assert not any(r.method == "POST" for r in requests)
+    assert any(r.method == "HEAD" for r in requests)
 
 
-def test_unrecognized_baseline_manifest_prevents_import(prepared):
-    (prepared["cache"] / importer.BASELINE_MANIFEST).write_text("unknown baseline")
-    with server(prepared) as (client, requests):
-        with pytest.raises(importer.ImportError, match="baseline manifest"):
+def test_cache_probe_is_removed_when_daemon_request_fails(prepared):
+    def fail_probe(request):
+        if request.method == "HEAD":
+            raise httpx.ConnectError("private error details")
+    with server(prepared, route_override=fail_probe) as (client, requests):
+        with pytest.raises(importer.ImportError, match="Could not verify"):
             importer.import_candidate("qwen38_4b", client=client)
-    assert not any(r.url.path == "/api/create" for r in requests)
+    assert list((prepared["cache"] / "blobs").iterdir()) == []
+    assert not any(r.method == "POST" for r in requests)
 
 
 @pytest.mark.parametrize("changes", [{"remote_host": "https://example.invalid"}, {"remote_model": "cloud-model"}, {"system": "Unexpected instructions"}, {"parameters": "num_ctx 8192"}, {"template": ""}, {"capabilities": []}])

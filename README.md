@@ -1,6 +1,8 @@
 # Margin
 
-A local web workspace for reviewing text against your own rubric. Start with a **blank rubric and empty optional instructor guidance**. Add your criteria, paste text or extract text from PDF/Word, compare local decision models, and enter your own final scores.
+A local-only rubric grading workspace with customizable decision models and optional AI explanations.
+
+Start with a **blank rubric and empty optional instructor guidance**. Add your criteria, paste text or extract text from PDF/Word, compare local decision models, and enter your own final scores.
 
 **[Open the single setup guide](SETUP.html)** for installation, the four bundled model presets, custom local connections, and server controls. After setup:
 
