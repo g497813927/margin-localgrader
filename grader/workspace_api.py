@@ -12,7 +12,7 @@ from .workspace import MAX_WORKSPACE_BYTES, ROOT, WorkspaceStore, model_catalog,
 workspace_store = WorkspaceStore()
 runtime_manager = RuntimeManager()
 RUNTIME_NAMES = {"clef": "Clef-Flash", "startlux": "StartLux Decision 4B",
-                 "d3": "Decision 3.0 Mini", "ollama": "Local explanation service"}
+                 "d3": "Decision 3.0 Mini", "ollama": "Local explanation and vision service"}
 
 
 def runtime_view(value):
@@ -76,7 +76,7 @@ def make_router(model_lock):
             locks = [model_lock] + ([explanations._LOCK] if service_id == "ollama" else [])
             for lock in locks:
                 if not lock.acquire(blocking=False):
-                    raise HTTPException(409, "A local assessment or explanation is busy. Wait before changing servers.")
+                    raise HTTPException(409, "A local assessment, explanation, or image analysis is busy. Wait before changing servers.")
                 release.callback(lock.release)
             try:
                 value = getattr(runtime_manager, action)(service_id)

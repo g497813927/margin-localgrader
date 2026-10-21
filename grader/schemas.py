@@ -120,6 +120,29 @@ class ExplanationSettings(StrictModel):
         return value
 
 
+class VisionSettings(StrictModel):
+    model: str = Field(default="openbmb/minicpm-v4.7:1b", min_length=1, max_length=200)
+    auto_detect: bool = Field(default=True, strict=True)
+    detailed_crops: bool = Field(default=True, strict=True)
+
+    @field_validator("model")
+    @classmethod
+    def local_vision_model(cls, value):
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*){0,2}(?::[A-Za-z0-9][A-Za-z0-9._-]*)?", value)
+                or value.lower().endswith((":cloud", "-cloud"))):
+            raise ValueError("Use the name of an installed local vision model, without a URL or cloud tag.")
+        return value
+
+
+class VisionRequest(StrictModel):
+    model: str = Field(min_length=1, max_length=200)
+    image_data_url: str = Field(min_length=1, max_length=11_000_000)
+    detailed_crops: bool = Field(default=True, strict=True)
+    transcribe: bool = Field(default=True, strict=True)
+
+    _valid_model = field_validator("model")(VisionSettings.local_vision_model.__func__)
+
+
 class ExplanationDecision(StrictModel):
     provider: Literal["laya", "systemone"]
     model: str = Field(min_length=1, max_length=1000)

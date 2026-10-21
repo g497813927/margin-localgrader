@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from types import MappingProxyType
@@ -21,7 +22,9 @@ from types import MappingProxyType
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / ".venv/bin/python"
+IS_WINDOWS = os.name == "nt"
+PYTHON = ROOT / (".venv/Scripts/python.exe" if IS_WINDOWS else ".venv/bin/python")
+D3_DEVICE = "mps" if sys.platform == "darwin" else "cpu"
 STARTUP_SECONDS = 240.0
 POLL_SECONDS = 0.25
 STOP_SECONDS = 45.0
@@ -41,7 +44,7 @@ class RuntimeSpec:
 SPECS = MappingProxyType({
     "clef": RuntimeSpec("run_clef.py", (1235,)),
     "startlux": RuntimeSpec("run_startlux.py", (1236, 1237)),
-    "d3": RuntimeSpec("run_d3.py", (1238,), ("--device", "mps")),
+    "d3": RuntimeSpec("run_d3.py", (1238,), ("--device", D3_DEVICE)),
     "ollama": RuntimeSpec("run_ollama.py", (11435,)),
 })
 MESSAGES = {
@@ -62,9 +65,21 @@ MESSAGES = {
 
 
 def clean_environment():
-    environment = {key: os.environ[key] for key in ("HOME", "TMPDIR", "LANG", "LC_ALL") if key in os.environ}
+    environment = {key: os.environ[key] for key in ("HOME", "TMPDIR", "LANG", "LC_ALL",
+        "SYSTEMROOT", "SystemRoot", "WINDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP") if key in os.environ}
+    if IS_WINDOWS:
+        paths = [str(ROOT / ".venv/Scripts")]
+        system_root = environment.get("SystemRoot") or environment.get("SYSTEMROOT") or environment.get("WINDIR")
+        if system_root:
+            paths.extend([str(Path(system_root) / "System32"), system_root])
+        local = environment.get("LOCALAPPDATA")
+        if local:
+            paths.append(str(Path(local) / "Programs/Ollama"))
+        search_path = ";".join(paths)
+    else:
+        search_path = f"{ROOT / '.venv/bin'}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     environment.update({
-        "PATH": f"{ROOT / '.venv/bin'}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": search_path,
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "HF_HUB_DISABLE_TELEMETRY": "1", "DO_NOT_TRACK": "1",
         "OTEL_SDK_DISABLED": "true", "TOKENIZERS_PARALLELISM": "false",
@@ -130,11 +145,11 @@ def _probe(runtime_id):
                 health = _metadata(client, 1238, "/health")
                 valid = (health.get("ok") is True and health.get("model") == "d3-mini"
                          and health.get("revision") == D3_REVISION and health.get("text_only") is True
-                         and health.get("device") == "mps" and health.get("max_context") == 8192)
+                         and health.get("device") == D3_DEVICE and health.get("max_context") == 8192)
             else:
                 version = _metadata(client, 11435, "/api/version")
                 cloud = _metadata(client, 11435, "/api/status").get("cloud", {})
-                valid = (version.get("version") == "0.40.3" and isinstance(cloud, dict)
+                valid = (version.get("version") in {"0.40.3", "0.40.5"} and isinstance(cloud, dict)
                          and cloud.get("disabled") is True and cloud.get("source") in {"env", "both"})
         return "ready" if valid else "occupied"
     except Exception:
@@ -256,10 +271,12 @@ class RuntimeManager:
                 script = ROOT / "scripts" / spec.script
                 if not PYTHON.is_file() or not os.access(PYTHON, os.X_OK) or not script.is_file():
                     raise ValueError
+                process_options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+                                   else {"start_new_session": True})
                 entry.process = subprocess.Popen([str(PYTHON), str(script), *spec.arguments],
                     cwd=str(ROOT), env=clean_environment(), stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
-                    close_fds=True, start_new_session=True)
+                    close_fds=True, **process_options)
             deadline = time.monotonic() + STARTUP_SECONDS
             while not entry.cancel.is_set():
                 if entry.process.poll() is not None:
@@ -323,6 +340,21 @@ class RuntimeManager:
             # A reaped PID/PGID can be reused. Never signal it; any remaining
             # listener is reported as unconfirmed cleanup by the caller.
             return True
+        if IS_WINDOWS:
+            system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
+            if not system_root:
+                return False
+            try:
+                # A live Popen handle establishes ownership. /T also stops the
+                # launcher's children; no executable-name or listening-port kill.
+                result = subprocess.run([str(Path(system_root) / "System32/taskkill.exe"),
+                    "/PID", str(process.pid), "/T", "/F"], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
+                    timeout=STOP_SECONDS, check=False)
+                process.wait(timeout=KILL_SECONDS)
+                return result.returncode == 0
+            except Exception:
+                return False
         try:
             # This group was created by our Popen. SIGINT invokes launcher finally
             # cleanup, including Ollama's separately grouped owned daemon.

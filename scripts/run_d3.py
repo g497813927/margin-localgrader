@@ -62,6 +62,18 @@ def configure_offline():
     install_network_guard()
 
 
+def flush_native_output():
+    """Flush the same C runtime used by Python before restoring output handles."""
+    # Windows Python uses the Universal CRT; CDLL(None) is the executable there,
+    # and does not export fflush. On POSIX the process symbol table contains libc.
+    library = "ucrtbase.dll" if sys.platform == "win32" else None
+    runtime = ctypes.CDLL(library)
+    runtime.fflush.argtypes = [ctypes.c_void_p]
+    runtime.fflush.restype = ctypes.c_int
+    if runtime.fflush(None) != 0:
+        raise RuntimeError("Could not flush the local runtime output safely.")
+
+
 @contextmanager
 def silence_process():
     """Silence native/Python output for the whole single-worker server lifetime."""
@@ -78,7 +90,7 @@ def silence_process():
                     yield
                 finally:
                     sink.flush()
-                    ctypes.CDLL(None).fflush(None)
+                    flush_native_output()
     finally:
         for fd, original in reversed(saved):
             try:
@@ -296,7 +308,7 @@ def create_app(model, max_context=8192, device="cpu"):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, default=ROOT / "models/d3-mini")
-    parser.add_argument("--device", choices=("cpu", "mps"), default="mps")
+    parser.add_argument("--device", choices=("cpu", "mps"), default="mps" if sys.platform == "darwin" else "cpu")
     parser.add_argument("--max-context", type=int, default=8192)
     parser.add_argument("--port", type=int, default=1238)
     args = parser.parse_args(argv)

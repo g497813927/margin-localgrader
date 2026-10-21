@@ -1,6 +1,8 @@
-fastapi==0.143.0
+fastapi==0.157.0
 uvicorn==0.54.0
 python-multipart==0.0.32
 httpx==0.28.1
-pypdf==6.20.0
+pypdf==6.21.1
 python-docx==1.2.0
+Pillow==13.0.0
+pypdfium2==5.14.0

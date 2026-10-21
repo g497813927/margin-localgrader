@@ -4,6 +4,9 @@
   const $ = (id) => document.getElementById(id);
   const activeRequests = new Set();
   const state = { rubric: null, assignmentDetails: "", gradingGuidance: "", models: [], catalog: [], services: [], runtimeTimer: null, runtimeBudget: 0, runtimeRequest: false, runtimeActions: new Set(), workspaceBusy: false, explanationSettings: null, explanations: [], explanationContext: null, explanationElements: new Map(), defaults: null, result: null, comparison: null, overrides: {}, revision: 0, pageEpoch: 0, busy: false, grading: false, initialized: false, expandedCriteria: new Set() };
+  const DEFAULT_VISION_MODEL = "openbmb/minicpm-v4.7:1b";
+  state.visionSettings = { model: DEFAULT_VISION_MODEL, auto_detect: true, detailed_crops: true };
+  state.vision = { file: null, prepared: null, analysis: null, detected: [], nativeImported: false, busy: false, epoch: 0, controller: null, added: false };
   const modelLetter = (index) => String.fromCharCode(65 + index);
   const selectedEntries = () => state.models.filter((entry) => entry.enabled);
   const currentModels = () => selectedEntries().map((entry) => modelSettings(entry.settings));
@@ -68,6 +71,7 @@
     state.busy = busy;
     for (const id of ["grade-button", "probe-model", "import-rubric", "rubric-file", "submission-file", "clear-submission", "forget-workspace"]) $(id).disabled = busy || !state.initialized;
     $("workspace").setAttribute("aria-busy", String(busy));
+    renderVisionControls();
     if (state.initialized) renderRuntimes();
   }
 
@@ -75,6 +79,10 @@
     // All browser requests are same-origin. Model endpoints are only handled by the local backend.
     if (!path.startsWith("/api/")) throw new Error("Only local application requests are allowed.");
     const controller = new AbortController();
+    const callerSignal = options.signal;
+    const abortFromCaller = () => controller.abort();
+    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (callerSignal?.aborted) controller.abort();
     activeRequests.add(controller);
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -90,7 +98,7 @@
       if (error.name === "AbortError") throw new Error("The local request took too long. Check your model server, then try again.");
       if (error instanceof TypeError) throw new Error("Cannot reach the local application. Make sure its server is still running.");
       throw error;
-    } finally { clearTimeout(timer); activeRequests.delete(controller); }
+    } finally { clearTimeout(timer); activeRequests.delete(controller); callerSignal?.removeEventListener("abort", abortFromCaller); }
   }
 
   function jsonRequest(data) { return { method: "POST", headers: { "Content-Type": "application/json", "X-Margin-Scoring-Version": "3" }, body: JSON.stringify(data) }; }
@@ -237,7 +245,7 @@
 
   function normalizeWorkspace(value) {
     const exactKeys = (object, keys) => object && typeof object === "object" && !Array.isArray(object) && Object.keys(object).every((key) => keys.includes(key));
-    if (!exactKeys(value, ["schema_version", "models", "explanation_settings"]) || value.schema_version !== 1 || !Array.isArray(value.models) || value.models.length > 8) throw new Error("Choose a version 1 model configuration with up to eight entries. Rubrics, submissions, and scores do not belong in this file.");
+    if (!exactKeys(value, ["schema_version", "models", "explanation_settings", "vision_settings"]) || value.schema_version !== 1 || !Array.isArray(value.models) || value.models.length > 8) throw new Error("Choose a version 1 model configuration with up to eight entries. Rubrics, submissions, and scores do not belong in this file.");
     const ids = new Set();
     const models = value.models.map((entry) => {
       if (!exactKeys(entry, ["id", "enabled", "preset_id", "settings"]) || typeof entry.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(entry.id) || ids.has(entry.id) || typeof entry.enabled !== "boolean" || ![null, "laya", "clef", "startlux", "d3"].includes(entry.preset_id)) throw new Error("Each configured model needs a unique ID, enabled state, and supported preset or custom connection.");
@@ -248,18 +256,24 @@
     });
     const explanation = value.explanation_settings;
     if (!exactKeys(explanation, ["enabled", "model"]) || typeof explanation.enabled !== "boolean" || typeof explanation.model !== "string" || explanation.model.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(explanation.model) || explanation.model.includes("://")) throw new Error("Use the name of an installed local Ollama explanation model.");
-    return { schema_version: 1, models, explanation_settings: { enabled: explanation.enabled, model: explanation.model } };
+    const vision = value.vision_settings === undefined ? { model: DEFAULT_VISION_MODEL } : value.vision_settings;
+    if (!exactKeys(vision, ["model", "auto_detect", "detailed_crops"]) || typeof vision.model !== "string" || vision.model.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(vision.model) || vision.model.includes("://")) throw new Error("Use the name of an installed local Ollama vision model.");
+    if (vision.auto_detect !== undefined && typeof vision.auto_detect !== "boolean") throw new Error("Automatic image detection must be enabled or disabled.");
+    if (vision.detailed_crops !== undefined && typeof vision.detailed_crops !== "boolean") throw new Error("Detailed image reading must be enabled or disabled.");
+    return { schema_version: 1, models, explanation_settings: { enabled: explanation.enabled, model: explanation.model }, vision_settings: { model: vision.model, auto_detect: vision.auto_detect ?? true, detailed_crops: vision.detailed_crops ?? true } };
   }
 
   function workspaceSnapshot() {
     // Explicit whitelist: never serialize rubric, assignment, submission, grades, or review notes.
-    return normalizeWorkspace({ schema_version: 1, models: state.models.map((entry) => ({ id: entry.id, enabled: entry.enabled, preset_id: entry.preset_id, settings: modelSettings(entry.settings) })), explanation_settings: { enabled: !!state.explanationSettings.enabled, model: state.explanationSettings.model } });
+    return normalizeWorkspace({ schema_version: 1, models: state.models.map((entry) => ({ id: entry.id, enabled: entry.enabled, preset_id: entry.preset_id, settings: modelSettings(entry.settings) })), explanation_settings: { enabled: !!state.explanationSettings.enabled, model: state.explanationSettings.model }, vision_settings: { model: state.visionSettings.model, auto_detect: state.visionSettings.auto_detect ?? true, detailed_crops: state.visionSettings.detailed_crops ?? true } });
   }
 
   function applyWorkspace(value) {
     const workspace = normalizeWorkspace(value);
     state.models = workspace.models;
     state.explanationSettings = workspace.explanation_settings;
+    if (state.visionSettings.model !== workspace.vision_settings.model || state.visionSettings.detailed_crops !== workspace.vision_settings.detailed_crops) clearVisionAnalysis();
+    state.visionSettings = workspace.vision_settings;
     invalidate(); renderSettings();
   }
 
@@ -357,6 +371,9 @@
     });
     $("explanation-enabled").checked = !!state.explanationSettings?.enabled;
     $("explanation-model").value = state.explanationSettings?.model || "qwen38-27b:q4_k_m";
+    $("vision-model").value = state.visionSettings.model;
+    $("vision-auto-detect").checked = state.visionSettings.auto_detect ?? true;
+    $("vision-detailed-crops").checked = state.visionSettings.detailed_crops ?? true;
     updateModelSummary(); renderPicker(); renderRuntimes();
   }
 
@@ -409,6 +426,7 @@
   async function workspaceAction(action, file = null) {
     if (state.workspaceBusy) return;
     const revision = state.revision, epoch = state.pageEpoch;
+    const visionSettings = JSON.stringify(state.visionSettings);
     state.workspaceBusy = true;
     for (const id of ["save-workspace", "load-workspace", "import-workspace"]) $(id).disabled = true;
     status("workspace-status", action === "save" ? "Saving model configuration only…" : "Loading model configuration…");
@@ -420,12 +438,12 @@
         if (!file || file.size > 64 * 1024) throw new Error("Choose a model configuration JSON file no larger than 64 KB.");
         const raw = await file.text();
         normalizeWorkspace(JSON.parse(raw));
-        if (revision !== state.revision || epoch !== state.pageEpoch) return;
+        if (revision !== state.revision || epoch !== state.pageEpoch || visionSettings !== JSON.stringify(state.visionSettings)) return;
         response = await api("/api/workspace/validate", { ...jsonRequest(null), body: raw }, 20000);
       }
       if (epoch !== state.pageEpoch) return;
-      if (action === "save") status("workspace-status", revision === state.revision ? "Model and explanation settings saved on this computer. No rubric, assignment, submission, or scores were saved." : "The earlier model configuration was saved. Your newer changes remain unsaved in this page.");
-      else if (revision === state.revision) { applyWorkspace(response.workspace); status("workspace-status", action === "load" ? (response.saved ? "Saved model configuration loaded." : "Default model configuration loaded; no saved configuration exists.") : "Configuration imported into this page. Save explicitly to reuse it. Student work and rubric were kept."); }
+      if (action === "save") status("workspace-status", revision === state.revision && visionSettings === JSON.stringify(state.visionSettings) ? "Model, explanation, and vision settings saved on this computer. No rubric, assignment, submission, images, or scores were saved." : "The earlier model configuration was saved. Your newer changes remain unsaved in this page.");
+      else if (revision === state.revision && visionSettings === JSON.stringify(state.visionSettings)) { applyWorkspace(response.workspace); status("workspace-status", action === "load" ? (response.saved ? "Saved model configuration loaded." : "Default model configuration loaded; no saved configuration exists.") : "Configuration imported into this page. Save explicitly to reuse it. Student work and rubric were kept."); }
       else status("workspace-status", "Configuration changed while loading. The response was discarded; load again if needed.");
     } catch (error) { if (epoch === state.pageEpoch) status("workspace-status", error instanceof SyntaxError ? "This file is not valid model configuration JSON." : error.message, true); }
     finally { state.workspaceBusy = false; for (const id of ["save-workspace", "load-workspace", "import-workspace"]) $(id).disabled = false; }
@@ -438,17 +456,225 @@
     element.hidden = !warnings?.length;
   }
 
+  function renderVisionControls() {
+    const vision = state.vision;
+    const unavailable = state.busy || !state.initialized;
+    $("vision-file").disabled = unavailable;
+    $("vision-analyze").disabled = unavailable || vision.busy || !vision.prepared;
+    $("vision-clear").disabled = !vision.file && !vision.prepared && !vision.busy;
+    $("vision-show-page").disabled = unavailable || vision.busy || !vision.file;
+    $("vision-detected-select").disabled = unavailable || vision.busy || !vision.file;
+    $("vision-index").disabled = unavailable || vision.busy;
+    $("vision-image-index").disabled = unavailable || vision.busy;
+    $("vision-reviewed").disabled = vision.busy || !vision.analysis || vision.added;
+    $("vision-append").disabled = unavailable || vision.busy || !vision.analysis || vision.added || !$("vision-reviewed").checked || ![visionNativeAppendText(), $("vision-transcription").value, $("vision-description").value].some((text) => text.trim());
+    $("grade-button").disabled = unavailable || vision.busy;
+    $("vision-panel").setAttribute("aria-busy", String(vision.busy));
+  }
+
+  function clearVisionAnalysis() {
+    const vision = state.vision;
+    vision.epoch += 1;
+    vision.controller?.abort();
+    vision.controller = null;
+    vision.busy = false;
+    vision.analysis = null;
+    vision.added = false;
+    $("vision-transcription").value = "";
+    $("vision-description").value = "";
+    $("vision-reviewed").checked = false;
+    $("vision-analysis-model").textContent = "";
+    $("vision-analysis").hidden = true;
+    $("vision-views").hidden = true;
+    $("vision-view-results").replaceChildren();
+    $("vision-transcription-field").hidden = false;
+    showWarnings("vision-uncertainties", []);
+    status("vision-status", "");
+    renderVisionControls();
+  }
+
+  function clearVision() {
+    clearVisionAnalysis();
+    state.vision.file = null;
+    state.vision.prepared = null;
+    state.vision.detected = [];
+    state.vision.nativeImported = false;
+    $("vision-file").value = "";
+    $("vision-preview").hidden = true;
+    $("vision-image").removeAttribute("src");
+    $("vision-image").alt = "";
+    $("vision-source").textContent = "";
+    $("vision-index").value = "1";
+    $("vision-index").max = "1";
+    $("vision-count").textContent = "";
+    $("vision-image-controls").hidden = true;
+    $("vision-image-index").replaceChildren();
+    $("vision-native").hidden = true;
+    $("vision-native-text").value = "";
+    $("vision-native-note").textContent = "";
+    $("vision-detected").hidden = true;
+    $("vision-detected-select").replaceChildren();
+    $("vision-detected-summary").textContent = "";
+    showWarnings("vision-warnings", []);
+    renderVisionControls();
+  }
+
+  function visionItemKey(item) {
+    return item.image_index === undefined ? String(item.index) : `${item.index}:${item.image_index}`;
+  }
+
+  function visionUsesNativeText() {
+    return state.vision.prepared?.kind === "pdf_vectors" && !!state.vision.prepared.native_text?.trim();
+  }
+
+  function visionNativeAppendText() {
+    return visionUsesNativeText() && !state.vision.nativeImported ? state.vision.prepared.native_text : "";
+  }
+
+  async function prepareVision(file, index = 1, detected = [], imageIndex = undefined, nativeImported = false) {
+    if (!file || state.busy || !state.initialized) return;
+    clearVision();
+    if (file.size > 15 * 1024 * 1024) { status("vision-status", "Choose one image or document no larger than 15 MB.", true); return; }
+    if (!/\.(png|jpe?g|webp|pdf|docx)$/i.test(file.name)) { status("vision-status", "Choose a PNG, JPEG, WebP, PDF, or Word (.docx) file.", true); return; }
+    if (!Number.isInteger(index) || index < 1) { status("vision-status", "Choose a whole page or image number starting at 1.", true); return; }
+    if (imageIndex !== undefined && (!Number.isInteger(imageIndex) || imageIndex < 0 || imageIndex > 300)) { status("vision-status", "Choose an embedded image or the page layout.", true); return; }
+    const vision = state.vision;
+    vision.file = file;
+    vision.nativeImported = nativeImported;
+    vision.detected = detected.filter((item) => item && Number.isInteger(item.index) && item.index >= 1 && item.index <= 300 && typeof item.label === "string" && (item.image_index === undefined || (Number.isInteger(item.image_index) && item.image_index >= 0 && item.image_index <= 300))).slice(0, 300).map((item) => ({ index: item.index, label: item.label, ...(item.image_index === undefined ? {} : { image_index: item.image_index }) }));
+    if (vision.detected.length) {
+      for (const item of vision.detected) { const option = node("option", "", item.label); option.value = visionItemKey(item); $("vision-detected-select").append(option); }
+      $("vision-detected-select").value = visionItemKey({ index, image_index: imageIndex });
+      $("vision-detected-summary").textContent = `${vision.detected.length} visual ${vision.detected.length === 1 ? "item" : "items"} detected in this submission. Check each relevant item; detection can miss some content.`;
+      $("vision-detected").hidden = false;
+    }
+    vision.busy = true;
+    vision.controller = new AbortController();
+    const epoch = vision.epoch;
+    const pageEpoch = state.pageEpoch;
+    renderVisionControls();
+    status("vision-status", "Preparing a local image preview…");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("index", String(index));
+      if (imageIndex !== undefined) form.append("image_index", String(imageIndex));
+      const data = await api("/api/vision/prepare", { method: "POST", body: form, signal: vision.controller.signal }, 120000);
+      if (epoch !== vision.epoch || pageEpoch !== state.pageEpoch) return;
+      if (typeof data.image_data_url !== "string" || data.image_data_url.length > 24 * 1024 * 1024 || !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(data.image_data_url) || !Number.isInteger(data.index) || !Number.isInteger(data.count) || data.index !== index || data.count < index || !Number.isInteger(data.width) || !Number.isInteger(data.height) || data.width < 1 || data.height < 1) throw new Error("The local server returned an invalid image preview.");
+      if (data.native_text !== undefined && (typeof data.native_text !== "string" || data.native_text.length > 200000)) throw new Error("The local server returned invalid native PDF text.");
+      if (data.image_count !== undefined && (!Number.isInteger(data.image_count) || data.image_count < 0 || data.image_count > 300 || !Number.isInteger(data.image_index) || data.image_index < 0 || data.image_index > data.image_count || (imageIndex !== undefined && data.image_index !== imageIndex))) throw new Error("The local server returned an invalid embedded image selection.");
+      vision.prepared = data;
+      $("vision-image").src = data.image_data_url;
+      $("vision-image").alt = "Local image preview. Review the original visual content against the extracted text.";
+      $("vision-source").textContent = String(data.source_label || "Image") + ` · ${data.width} × ${data.height} pixels`;
+      $("vision-index").value = String(data.index);
+      $("vision-index").max = String(data.count);
+      $("vision-count").textContent = `of ${data.count}`;
+      $("vision-preview").hidden = false;
+      if (Number.isInteger(data.image_count) && data.image_count > 0) {
+        const pageOption = node("option", "", "Page layout"); pageOption.value = "0"; $("vision-image-index").append(pageOption);
+        for (let image = 1; image <= data.image_count; image += 1) { const option = node("option", "", `Embedded image ${image} of ${data.image_count}`); option.value = String(image); $("vision-image-index").append(option); }
+        $("vision-image-index").value = String(data.image_index);
+        $("vision-image-controls").hidden = false;
+      }
+      const nativeText = data.native_text || "";
+      $("vision-native").hidden = !nativeText;
+      $("vision-native-text").value = nativeText;
+      $("vision-native-note").textContent = nativeImported ? "Preserved in the submission text. Vision analysis does not rewrite or append this text." : "Extracted directly from this PDF page. When reading the page layout, adding reviewed content includes this text without rewriting it.";
+      if (data.image_index !== undefined) $("vision-detected-select").value = visionItemKey({ index, image_index: data.image_index });
+      showWarnings("vision-warnings", data.warnings);
+      status("vision-status", "Preview ready. Analyze locally, then check the transcription and visual description.");
+    } catch (error) { if (epoch === vision.epoch && pageEpoch === state.pageEpoch) status("vision-status", error.message, true); }
+    finally { if (epoch === vision.epoch && pageEpoch === state.pageEpoch) { vision.busy = false; vision.controller = null; renderVisionControls(); } }
+  }
+
+  async function analyzeVision() {
+    const vision = state.vision;
+    if (state.busy || vision.busy || !vision.prepared || !state.initialized) return;
+    const model = state.visionSettings.model;
+    const detailedCrops = state.visionSettings.detailed_crops ?? true;
+    const transcribe = !visionUsesNativeText();
+    if (typeof model !== "string" || model.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(model) || model.includes("://")) { status("vision-status", "Enter an installed local vision model name.", true); return; }
+    clearVisionAnalysis();
+    vision.busy = true;
+    vision.controller = new AbortController();
+    const epoch = vision.epoch;
+    const pageEpoch = state.pageEpoch;
+    renderVisionControls();
+    status("vision-status", detailedCrops ? "Reading the overview and detailed crops locally, one view at a time… This takes longer than a single image." : "Analyzing the image on this computer… The first model load can take longer.");
+    try {
+      const data = await api("/api/vision/analyze", { ...jsonRequest({ image_data_url: vision.prepared.image_data_url, model, detailed_crops: detailedCrops, transcribe }), signal: vision.controller.signal });
+      if (epoch !== vision.epoch || pageEpoch !== state.pageEpoch || model !== state.visionSettings.model || detailedCrops !== (state.visionSettings.detailed_crops ?? true)) return;
+      if (typeof data.transcription !== "string" || typeof data.description !== "string" || !Array.isArray(data.uncertainties) || data.uncertainties.some((item) => typeof item !== "string")) throw new Error("The local vision model returned an unreadable analysis. No submission text or grades were changed.");
+      const views = data.views ?? [];
+      if (!Array.isArray(views) || views.length > 10 || views.some((view) => !view || typeof view.label !== "string" || typeof view.transcription !== "string" || typeof view.description !== "string" || !Array.isArray(view.uncertainties) || view.uncertainties.some((item) => typeof item !== "string") || !Array.isArray(view.bounds) || view.bounds.length !== 4 || view.bounds.some((value) => !Number.isFinite(value) || value < 0) || view.bounds[0] >= view.bounds[2] || view.bounds[1] >= view.bounds[3] || view.bounds[2] > vision.prepared.width || view.bounds[3] > vision.prepared.height)) throw new Error("The local vision model returned unreadable crop details. No submission text or grades were changed.");
+      const incompleteViews = data.incomplete_views ?? 0;
+      if (!Number.isInteger(incompleteViews) || incompleteViews < 0 || incompleteViews > views.length || views.some((view) => view.status !== undefined && !["complete", "incomplete"].includes(view.status)) || views.filter((view) => view.status === "incomplete").length !== incompleteViews || views.some((view) => view.status === "incomplete" && (view.transcription || view.description))) throw new Error("The local vision model returned invalid partial results. No submission text or grades were changed.");
+      vision.analysis = { model, uncertainties: data.uncertainties };
+      $("vision-transcription").value = transcribe ? data.transcription : "";
+      $("vision-transcription-field").hidden = !transcribe;
+      for (const view of views) {
+        const details = node("details", "vision-view");
+        details.append(node("summary", "", `${view.label}${view.status === "incomplete" ? " · Could not read this view" : ""}`));
+        details.append(node("p", "field-help", `Source region: ${view.bounds.join(", ")} (left, top, right, bottom).`));
+        if (transcribe && view.transcription) { details.append(node("p", "vision-view-label", "Transcribed text")); details.append(node("pre", "vision-view-text", view.transcription)); }
+        if (view.description) { details.append(node("p", "vision-view-label", "Visual description")); details.append(node("pre", "vision-view-text", view.description)); }
+        for (const uncertainty of view.uncertainties) details.append(node("p", "field-help", uncertainty));
+        $("vision-view-results").append(details);
+      }
+      $("vision-views").hidden = !views.length;
+      $("vision-description").value = data.description;
+      $("vision-analysis-model").textContent = `${model} · ${views.length || 1} local ${views.length === 1 || !views.length ? "view" : "views"} · Draft extraction, not a grade`;
+      showWarnings("vision-uncertainties", data.uncertainties);
+      $("vision-analysis").hidden = false;
+      status("vision-status", incompleteViews ? `Partial reading: ${incompleteViews} of ${views.length} views could not be read. Completed views are available below. Unread regions are not missing student work; check the original before adding evidence.` : "Check labels, values, arrows, and relationships against the preview. Correct any mistakes before adding the text.", incompleteViews > 0);
+    } catch (error) { if (epoch === vision.epoch && pageEpoch === state.pageEpoch) status("vision-status", error.message, true); }
+    finally { if (epoch === vision.epoch && pageEpoch === state.pageEpoch) { vision.busy = false; vision.controller = null; renderVisionControls(); } }
+  }
+
+  function appendVision() {
+    const vision = state.vision;
+    if (state.busy || vision.busy || !vision.analysis || !vision.prepared || vision.added || !$("vision-reviewed").checked) return;
+    const transcription = visionUsesNativeText() ? "" : $("vision-transcription").value.trim();
+    const nativeText = visionNativeAppendText();
+    const description = $("vision-description").value.trim();
+    if (!transcription && !description && !nativeText.trim()) { status("vision-status", "There is no reviewed content to add. Recognition failure does not mean the student's answer is missing.", true); return; }
+    const source = String(vision.prepared.source_label || "Image").replace(/[\r\n]/g, " ");
+    const parts = [`[Reviewed image evidence: ${source}]`];
+    if (nativeText) parts.push(`Native PDF text (verbatim):\n${nativeText}`);
+    if (transcription) parts.push(`Transcribed text (reviewed):\n${transcription}`);
+    if (description) parts.push(`AI-assisted visual description (reviewed):\n${description}`);
+    if (vision.analysis.uncertainties.length) parts.push(`Recognition uncertainties to consider:\n${vision.analysis.uncertainties.join("\n")}`);
+    parts.push("[End reviewed image evidence]");
+    const text = [$("submission-text").value, parts.join("\n\n")].filter(Boolean).join("\n\n");
+    if (Array.from(text).length > 200000) { status("vision-status", "Adding this content would exceed the 200,000-character submission limit. Shorten the reviewed text first.", true); return; }
+    $("submission-text").value = text;
+    vision.added = true;
+    $("vision-reviewed").checked = false;
+    invalidate(); updateTextMeta(); renderVisionControls();
+    status("vision-status", "Reviewed image content added. Check the combined submission, then grade again when ready.");
+  }
+
   async function extractFile(file, kind) {
     if (!file || state.busy) return;
     if (file.size > 15 * 1024 * 1024) { announce("This document exceeds the 15 MB upload limit.", true); return; }
+    if (kind === "submission" && /\.(png|jpe?g|webp)$/i.test(file.name)) {
+      $("vision-panel").open = true;
+      return prepareVision(file);
+    }
+    if (kind === "submission") clearVision();
     announce("");
     setBusy(true);
     const originalRevision = state.revision;
     const pageEpoch = state.pageEpoch;
+    const detectVisuals = kind === "submission" && (state.visionSettings.auto_detect ?? true) && /\.(pdf|docx)$/i.test(file.name);
+    let detected = [], acceptedRevision = null;
     status(kind === "submission" ? "grading-status" : "model-status", `Reading ${file.name} locally…`);
     try {
       const form = new FormData();
       form.append("file", file);
+      form.append("detect_visuals", String(detectVisuals));
       const data = await api("/api/extract", { method: "POST", body: form }, 120000);
       if (state.revision !== originalRevision) throw new Error("Your workspace changed while the document was being read. Import it again when you are ready to replace the text.");
       if (kind === "submission") {
@@ -457,7 +683,9 @@
         showWarnings("extraction-warnings", data.warnings);
         updateTextMeta();
         invalidate();
-        status("grading-status", `Text extracted from ${file.name}${data.pages ? ` · ${data.pages} ${data.pages === 1 ? "page" : "pages"}` : ""}. Check it before grading.`);
+        acceptedRevision = state.revision;
+        if (detectVisuals && Array.isArray(data.visuals)) detected = data.visuals.filter((item) => item && Number.isInteger(item.index) && item.index >= 1 && item.index <= 300 && typeof item.label === "string");
+        status("grading-status", `Text extracted from ${file.name}${data.pages ? ` · ${data.pages} ${data.pages === 1 ? "page" : "pages"}` : ""}.${detected.length ? ` ${detected.length} visual ${detected.length === 1 ? "item" : "items"} detected for review below.` : ""} Check it before grading.`);
       } else {
         state.rubric.instructions = data.text || "";
         invalidate();
@@ -467,6 +695,12 @@
       }
     } catch (error) { if (state.pageEpoch === pageEpoch) { announce(error.message, true); status(kind === "submission" ? "grading-status" : "model-status", ""); } }
     finally { setBusy(false); }
+    // Reuse the same in-memory File, after text extraction has released its busy
+    // state. A changed/cleared submission must never start a stale preview.
+    if (detected.length && acceptedRevision === state.revision && pageEpoch === state.pageEpoch && (state.visionSettings.auto_detect ?? true)) {
+      $("vision-panel").open = true;
+      await prepareVision(file, detected[0].index, detected, detected[0].image_index, true);
+    }
   }
 
   function download(filename, content, type) {
@@ -733,7 +967,7 @@
   }
 
   async function grade() {
-    if (state.busy) return;
+    if (state.busy || state.vision.busy) return;
     announce("");
     try { validate(); } catch (error) { announce(error.message, true); return; }
     const revision = state.revision;
@@ -767,6 +1001,7 @@
   }
 
   function clearSubmission() {
+    clearVision();
     $("submission-text").value = "";
     $("submission-name").value = "";
     $("submission-file").value = "";
@@ -777,6 +1012,49 @@
   }
 
   function bindEvents() {
+    $("vision-file").addEventListener("change", () => {
+      const files = $("vision-file").files;
+      const file = files[0];
+      const count = files.length;
+      $("vision-file").value = "";
+      if (count > 1) { clearVision(); status("vision-status", "Choose one image or document at a time.", true); return; }
+      if (file) return prepareVision(file);
+    });
+    $("vision-show-page").addEventListener("click", () => {
+      if (state.vision.busy || !state.vision.file) return;
+      const index = Number($("vision-index").value);
+      if (!Number.isInteger(index) || index < 1 || index > state.vision.prepared?.count) { status("vision-status", "Choose a page or image number within this document.", true); return; }
+      return prepareVision(state.vision.file, index, state.vision.detected, undefined, state.vision.nativeImported);
+    });
+    $("vision-detected-select").addEventListener("change", () => {
+      if (state.vision.busy || !state.vision.file) return;
+      const item = state.vision.detected.find((entry) => visionItemKey(entry) === $("vision-detected-select").value);
+      if (item) return prepareVision(state.vision.file, item.index, state.vision.detected, item.image_index, state.vision.nativeImported);
+    });
+    $("vision-image-index").addEventListener("change", () => {
+      if (state.vision.busy || !state.vision.file || !state.vision.prepared) return;
+      const imageIndex = Number($("vision-image-index").value);
+      if (Number.isInteger(imageIndex) && imageIndex >= 0 && imageIndex <= state.vision.prepared.image_count) return prepareVision(state.vision.file, state.vision.prepared.index, state.vision.detected, imageIndex, state.vision.nativeImported);
+    });
+    $("vision-analyze").addEventListener("click", analyzeVision);
+    $("vision-append").addEventListener("click", appendVision);
+    $("vision-clear").addEventListener("click", clearVision);
+    $("vision-reviewed").addEventListener("change", renderVisionControls);
+    for (const id of ["vision-transcription", "vision-description"]) $(id).addEventListener("input", () => { $("vision-reviewed").checked = false; state.vision.added = false; renderVisionControls(); });
+    $("vision-model").addEventListener("input", () => {
+      state.visionSettings.model = $("vision-model").value;
+      clearVisionAnalysis();
+      status("workspace-status", "Vision model changed in this page. Save the workspace explicitly to reuse it.");
+    });
+    $("vision-detailed-crops").addEventListener("change", () => {
+      state.visionSettings.detailed_crops = $("vision-detailed-crops").checked;
+      clearVisionAnalysis();
+      status("workspace-status", "Detailed image reading changed. Save the workspace explicitly to reuse this setting.");
+    });
+    $("vision-auto-detect").addEventListener("change", () => {
+      state.visionSettings.auto_detect = $("vision-auto-detect").checked;
+      status("workspace-status", "Automatic image detection updated for document imports. Save the workspace explicitly to reuse this setting.");
+    });
     $("explanation-enabled").addEventListener("change", () => { state.explanationSettings.enabled = $("explanation-enabled").checked; invalidate(); });
     $("explanation-model").addEventListener("input", () => { state.explanationSettings.model = $("explanation-model").value; invalidate(); });
     $("assignment-details").addEventListener("input", (event) => { state.assignmentDetails = event.target.value; invalidate(); });
@@ -792,7 +1070,7 @@
     $("load-workspace").addEventListener("click", () => workspaceAction("load"));
     $("import-workspace").addEventListener("click", () => $("workspace-file").click());
     $("workspace-file").addEventListener("change", () => { const file = $("workspace-file").files[0]; $("workspace-file").value = ""; if (file) void workspaceAction("import", file); });
-    $("export-workspace").addEventListener("click", () => { try { download("margin-model-workspace.json", JSON.stringify(workspaceSnapshot(), null, 2), "application/json"); status("workspace-status", "Exported model and explanation settings only."); } catch (error) { status("workspace-status", error.message, true); } });
+    $("export-workspace").addEventListener("click", () => { try { download("margin-model-workspace.json", JSON.stringify(workspaceSnapshot(), null, 2), "application/json"); status("workspace-status", "Exported model, explanation, and vision settings only."); } catch (error) { status("workspace-status", error.message, true); } });
     $("model-settings").addEventListener("toggle", () => { if ($("model-settings").open) startRuntimePolling(); else stopRuntimePolling(); });
     $("refresh-runtimes").addEventListener("click", startRuntimePolling);
     $("probe-model").addEventListener("click", async () => {
@@ -833,15 +1111,16 @@
       } else await extractFile(file, "rubric");
     });
     $("export-rubric").addEventListener("click", () => { if (state.rubric) download(`${safeFilename(state.rubric.title)}-rubric.json`, JSON.stringify(state.rubric, null, 2), "application/json"); });
-    $("submission-file").addEventListener("change", async () => { const file = $("submission-file").files[0]; $("submission-file").value = ""; await extractFile(file, "submission"); });
+    $("submission-file").addEventListener("change", async () => { const files = $("submission-file").files; const file = files[0], count = files.length; $("submission-file").value = ""; if (count > 1) { announce("Choose one submission file at a time.", true); return; } await extractFile(file, "submission"); });
     const drop = $("submission-drop");
     for (const type of ["dragenter", "dragover"]) drop.addEventListener(type, (event) => { event.preventDefault(); if (!state.busy) drop.classList.add("dragover"); });
     for (const type of ["dragleave", "drop"]) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.remove("dragover"); });
-    drop.addEventListener("drop", (event) => { if (event.dataTransfer.files.length > 1) { announce("Choose one submission document at a time.", true); return; } extractFile(event.dataTransfer.files[0], "submission"); });
+    drop.addEventListener("drop", (event) => { if (event.dataTransfer.files.length > 1) { announce("Choose one submission file at a time.", true); return; } extractFile(event.dataTransfer.files[0], "submission"); });
     $("clear-submission").addEventListener("click", clearSubmission);
     $("forget-workspace").addEventListener("click", () => {
       state.rubric = clone(state.defaults.rubric); state.expandedCriteria.clear(); state.models = clone(state.defaults.models);
       state.explanationSettings = clone(state.defaults.explanationSettings);
+      state.visionSettings = clone(state.defaults.visionSettings);
       state.assignmentDetails = ""; $("assignment-details").value = "";
       state.gradingGuidance = ""; $("grading-guidance").value = "";
       clearSubmission(); renderRubric(); renderSettings();
@@ -861,6 +1140,7 @@
     window.addEventListener("pagehide", () => {
       state.revision += 1;
       state.pageEpoch += 1;
+      clearVision();
       stopRuntimePolling();
       for (const controller of activeRequests) controller.abort();
       $("submission-text").value = ""; $("submission-name").value = ""; $("submission-file").value = "";
@@ -876,6 +1156,7 @@
     // Disable browser autofill for text that can contain student data.
     for (const input of document.querySelectorAll("input,textarea")) input.setAttribute("autocomplete", "off");
     $("submission-text").value = ""; $("submission-name").value = ""; $("assignment-details").value = ""; $("grading-guidance").value = "";
+    clearVision();
     try {
       const [defaultsResponse, catalogResponse, workspaceResponse] = await Promise.allSettled([api("/api/defaults", {}, 20000), api("/api/model-catalog", {}, 20000), api("/api/workspace", {}, 20000)]);
       if (defaultsResponse.status !== "fulfilled") throw defaultsResponse.reason;
@@ -885,8 +1166,8 @@
       if (!Array.isArray(catalog.models) || catalog.models.some((item) => !["laya", "clef", "startlux", "d3"].includes(item.id) || !item.settings)) throw new Error("The local model catalog is unavailable.");
       state.catalog = catalog.models.map((item) => ({ ...item, settings: modelSettings(item.settings) }));
       const presetIds = ["laya", "clef", "startlux", "d3"];
-      const defaultWorkspace = normalizeWorkspace({ schema_version: 1, models: defaults.comparison_models.map((settings, index) => ({ id: `default-${index + 1}`, enabled: true, preset_id: presetIds[index] || null, settings: modelSettings(settings) })), explanation_settings: defaults.explanation_settings || { enabled: true, model: "qwen38-27b:q4_k_m" } });
-      state.defaults = { rubric: normalizeRubric(defaults.rubric), models: clone(defaultWorkspace.models), explanationSettings: clone(defaultWorkspace.explanation_settings), gradingGuidance: typeof defaults.grading_guidance === "string" ? defaults.grading_guidance : "" };
+      const defaultWorkspace = normalizeWorkspace({ schema_version: 1, models: defaults.comparison_models.map((settings, index) => ({ id: `default-${index + 1}`, enabled: true, preset_id: presetIds[index] || null, settings: modelSettings(settings) })), explanation_settings: defaults.explanation_settings || { enabled: true, model: "qwen38-27b:q4_k_m" }, vision_settings: defaults.vision_settings || { model: DEFAULT_VISION_MODEL } });
+      state.defaults = { rubric: normalizeRubric(defaults.rubric), models: clone(defaultWorkspace.models), explanationSettings: clone(defaultWorkspace.explanation_settings), visionSettings: clone(defaultWorkspace.vision_settings), gradingGuidance: typeof defaults.grading_guidance === "string" ? defaults.grading_guidance : "" };
       let workspace = defaultWorkspace;
       try {
         if (workspaceResponse.status !== "fulfilled") throw new Error("Unavailable");
@@ -894,6 +1175,7 @@
         if (workspaceResponse.value.saved) status("workspace-status", "Your explicitly saved model configuration is loaded. Student work is never restored.");
       } catch { status("workspace-status", "Saved configuration could not be loaded. Default models are active in this page; the saved file has not been changed. Import a valid configuration or save explicitly to recover.", true); }
       state.models = workspace.models; state.explanationSettings = workspace.explanation_settings;
+      state.visionSettings = workspace.vision_settings;
       state.rubric = clone(state.defaults.rubric);
       state.gradingGuidance = state.defaults.gradingGuidance; $("grading-guidance").value = state.gradingGuidance;
       renderRubric(); renderSettings(); bindEvents(); state.initialized = true; setBusy(false);

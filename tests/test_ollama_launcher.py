@@ -35,6 +35,7 @@ def test_offline_environment_removes_inherited_cloud_debug_proxy_and_native_trac
     assert not any(key in result for key in ("HTTPS_PROXY", "LLAMA_LOG_FILE", "AWS_SECRET_ACCESS_KEY"))
 
 
+@pytest.mark.skipif(launcher.IS_WINDOWS, reason="TIME_WAIT bind semantics differ on Windows")
 def test_port_preflight_reuses_time_wait_without_a_model_daemon(monkeypatch):
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -134,6 +135,7 @@ def test_portable_copy_of_tiny_synthetic_file_has_independent_contents(tmp_path)
 
 
 def test_main_launches_only_owned_quiet_serve_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "IS_WINDOWS", False)
     process = SimpleNamespace(pid=1234, wait=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
     stopped = []
     monkeypatch.setattr(launcher, "check_port", lambda: None)
@@ -193,3 +195,43 @@ def test_ready_requires_cloud_disabled_by_environment(monkeypatch, cloud, permit
         with pytest.raises(launcher.LaunchError, match="OLLAMA_NO_CLOUD"):
             launcher.wait_ready(process)
     assert routes == ["http://127.0.0.1:11435/api/version", "http://127.0.0.1:11435/api/status"]
+
+
+def test_windows_environment_keeps_only_required_platform_variables(tmp_path):
+    inherited = {"SystemRoot": "C:/Windows", "WINDIR": "C:/Windows", "USERPROFILE": "C:/Users/Test",
+                 "LOCALAPPDATA": "C:/Users/Test/AppData/Local", "TEMP": "C:/Temp", "HTTPS_PROXY": "PRIVATE"}
+    result = launcher.offline_environment(tmp_path, inherited)
+    assert result["SystemRoot"] == inherited["SystemRoot"]
+    assert result["USERPROFILE"] == inherited["USERPROFILE"]
+    assert result["TEMP"] == inherited["TEMP"]
+    assert "HTTPS_PROXY" not in result
+
+
+def test_windows_stop_owned_never_signals_a_reaped_pid(monkeypatch):
+    monkeypatch.setattr(launcher, "IS_WINDOWS", True)
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: pytest.fail("No reused PID"))
+    launcher.stop_owned(SimpleNamespace(pid=12345, poll=lambda: 0))
+
+
+def test_windows_stop_owned_uses_only_owned_tree(monkeypatch):
+    monkeypatch.setattr(launcher, "IS_WINDOWS", True)
+    monkeypatch.setenv("SystemRoot", "C:/Windows")
+    waits = []
+    process = SimpleNamespace(pid=12345, poll=lambda: None, wait=lambda timeout: waits.append(timeout))
+    def run(command, **kwargs):
+        assert command == ["C:/Windows/System32/taskkill.exe", "/PID", "12345", "/T", "/F"]
+        assert kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    launcher.stop_owned(process)
+    assert waits == [5]
+
+
+@pytest.mark.parametrize("version,accepted", [("0.40.3", True), ("0.40.5", True), ("0.40.4", False), ("0.41.0", False)])
+def test_version_guard_is_explicit_reviewed_allowlist(tmp_path, monkeypatch, version, accepted):
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=f"ollama version is {version}", stderr=""))
+    if accepted:
+        launcher.check_version(tmp_path / "ollama", {})
+    else:
+        with pytest.raises(launcher.LaunchError):
+            launcher.check_version(tmp_path / "ollama", {})

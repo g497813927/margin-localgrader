@@ -21,7 +21,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from .privacy import install_network_guard
 install_network_guard()
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,8 +31,11 @@ from starlette.concurrency import run_in_threadpool
 from .defaults import DEFAULT_GRADING_GUIDANCE, DEFAULT_RUBRIC
 from .extract import extract_document
 from . import providers
-from .schemas import CompareRequest, ExplanationRequest, ExplanationSettings, GradeRequest, ProbeRequest, Settings
+from .schemas import CompareRequest, ExplanationRequest, ExplanationSettings, GradeRequest, ProbeRequest, Settings, VisionRequest, VisionSettings
 from . import explanations
+from . import vision
+from .visual_inputs import VisualInputError, prepare_visual
+from .visual_detection import detect_visuals as find_visuals
 from .scoring import score_response
 from .harness import HARNESS_VERSION, predict_rubric
 from .upload_boundary import BodySizeLimitMiddleware
@@ -136,6 +139,7 @@ def defaults():
     return {"rubric": DEFAULT_RUBRIC, "grading_guidance": DEFAULT_GRADING_GUIDANCE,
             "explanation_settings": ExplanationSettings().model_dump(),
             "explanation_endpoint": explanations.OLLAMA_ENDPOINT,
+            "vision_settings": VisionSettings().model_dump(),
             "settings": Settings().model_dump(),
             "comparison_models": [
                 Settings().model_dump(),
@@ -146,12 +150,23 @@ def defaults():
 
 
 @app.post("/api/extract")
-async def extract(file: UploadFile = File(...)):
+async def extract(file: UploadFile = File(...), detect_visuals: bool = Form(default=False)):
     try:
         data = await file.read(MAX_UPLOAD + 1)
         if len(data) > MAX_UPLOAD:
             raise HTTPException(413, "The upload is too large (15 MiB maximum).")
-        return await run_in_threadpool(extract_document, file.filename or "document", data)
+        result = await run_in_threadpool(extract_document, file.filename or "document", data)
+        if detect_visuals:
+            detected = await run_in_threadpool(find_visuals, file.filename or "document", data)
+            result.update(detected)
+            # Text remains literal. The optional visual review is a separate
+            # draft, never an automatic addition to the student's answer.
+            if detected["visuals"]:
+                result["warnings"] = [warning for warning in result["warnings"]
+                                      if not warning.startswith(("Only extractable PDF text", "Only Word document text", "No extractable text was found"))]
+                result["warnings"].append("Visual content was detected and opened for local review. Analyze and review the relevant images or pages before adding them to the submission.")
+            result["warnings"].extend(detected["visual_warnings"])
+        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
     finally:
@@ -169,6 +184,40 @@ def probe(request: ProbeRequest):
         return {"ok": False, "message": str(exc)}
     finally:
         MODEL_LOCK.release()
+
+
+@app.post("/api/vision/prepare")
+async def prepare_image(file: UploadFile = File(...), index: int = Form(default=1, ge=1, le=300),
+                        image_index: int | None = Form(default=None, ge=0, le=300)):
+    try:
+        data = await file.read(MAX_UPLOAD + 1)
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(413, "The upload is too large (15 MiB maximum).")
+        return await run_in_threadpool(prepare_visual, file.filename or "image", data, index,
+                                      image_index=image_index)
+    except VisualInputError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, "The visual input could not be prepared. Use a valid image or export the page as PNG.") from None
+    finally:
+        await file.close()
+
+
+@app.post("/api/vision/analyze")
+def analyze_image(request: VisionRequest):
+    # Shares the explanation lock (including Ollama start/stop). Neither this
+    # route nor preparation receives a rubric or changes any grading result.
+    try:
+        return vision.analyze_image(request.image_data_url, request.model,
+                                    runtime_guard=require_stable_explanation_runtime,
+                                    detailed_crops=request.detailed_crops,
+                                    transcribe=request.transcribe)
+    except vision.VisionInputError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except vision.VisionUnavailable as exc:
+        raise HTTPException(503, str(exc)) from None
 
 
 @app.post("/api/grade")

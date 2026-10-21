@@ -73,12 +73,13 @@ def harness(monkeypatch):
                     self.states[key] = "absent"
 
     fake = Harness()
+    monkeypatch.setattr(runtime, "IS_WINDOWS", False)
     # A clean source checkout need not contain a project .venv. Process creation
     # remains fully mocked; use the test interpreter only for the file preflight.
     monkeypatch.setattr(runtime, "PYTHON", Path(sys.executable))
     monkeypatch.setattr(runtime, "_probe", lambda key: fake.states[key])
     monkeypatch.setattr(runtime.subprocess, "Popen", fake.popen)
-    monkeypatch.setattr(runtime.os, "killpg", fake.killpg)
+    monkeypatch.setattr(runtime.os, "killpg", fake.killpg, raising=False)
     monkeypatch.setattr(runtime, "POLL_SECONDS", .002)
     manager = runtime.RuntimeManager()
     yield manager, fake
@@ -247,7 +248,7 @@ def test_failed_signal_keeps_live_handle_for_explicit_owned_stop_retry(harness, 
     assert result["owned"] and result["can_stop"] and not result["can_start"]
     manager.start("ollama")
     assert len(fake.calls) == 1
-    monkeypatch.setattr(runtime.os, "killpg", fake.killpg)
+    monkeypatch.setattr(runtime.os, "killpg", fake.killpg, raising=False)
     manager.stop("ollama")
     eventually(lambda: snapshot(manager, "ollama")["state"] == "stopped")
     assert fake.signals == [(process.pid, signal.SIGINT)]
@@ -300,7 +301,7 @@ HEALTH = {
     (1237, "/health"): {"status": "ok"},
     (1237, "/v1/models"): {"data": [{"id": "startlux-decision-4b-q8"}]},
     (1238, "/health"): {"ok": True, "model": "d3-mini", "revision": runtime.D3_REVISION,
-                         "device": "mps", "text_only": True, "max_context": 8192},
+                         "device": runtime.D3_DEVICE, "text_only": True, "max_context": 8192},
     (11435, "/api/version"): {"version": "0.40.3"},
     (11435, "/api/status"): {"cloud": {"disabled": True, "source": "env"}},
 }
@@ -376,3 +377,57 @@ def test_only_confirmed_refusal_means_free_port(number, expected, monkeypatch):
         raise OSError(number, "PRIVATE_OS_DETAIL")
     monkeypatch.setattr(runtime.socket, "create_connection", fail)
     assert runtime._port_state(1235) == expected
+
+
+def test_windows_environment_uses_scripts_and_system_paths_without_inherited_proxies(monkeypatch):
+    monkeypatch.setattr(runtime, "IS_WINDOWS", True)
+    monkeypatch.setattr(runtime.os, "environ", {"SystemRoot": "C:/Windows", "USERPROFILE": "C:/Users/Test",
+        "LOCALAPPDATA": "C:/Users/Test/AppData/Local", "TEMP": "C:/Temp", "PATH": "PRIVATE_BIN", "HTTPS_PROXY": "PRIVATE_PROXY"})
+    environment = runtime.clean_environment()
+    assert environment["SystemRoot"] == "C:/Windows" and environment["TEMP"] == "C:/Temp"
+    assert str(runtime.ROOT / ".venv/Scripts") in environment["PATH"]
+    assert "C:/Windows/System32" in environment["PATH"] and ";" in environment["PATH"]
+    assert "PRIVATE" not in json.dumps(environment)
+
+
+def test_windows_stop_targets_only_live_owned_process_tree(monkeypatch):
+    monkeypatch.setattr(runtime, "IS_WINDOWS", True)
+    monkeypatch.setenv("SystemRoot", "C:/Windows")
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command == ["C:/Windows/System32/taskkill.exe", "/PID", "12345", "/T", "/F"]
+        assert kwargs["shell"] is False and kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+        return type("Result", (), {"returncode": 0})()
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+    process = FakeProcess(12345)
+    assert runtime.RuntimeManager._stop_owned(process)
+    assert len(calls) == 1
+    assert runtime.RuntimeManager._stop_owned(process)
+    assert len(calls) == 1  # A reaped PID is never reused for cleanup.
+
+
+def test_windows_start_uses_owned_process_group_without_posix_session(harness, monkeypatch):
+    manager, fake = harness
+    monkeypatch.setattr(runtime, "IS_WINDOWS", True)
+    monkeypatch.setattr(runtime.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setenv("SystemRoot", "C:/Windows")
+    def stop(command, **kwargs):
+        fake.states["ollama"] = "absent"
+        return type("Result", (), {"returncode": 0})()
+    monkeypatch.setattr(runtime.subprocess, "run", stop)
+    manager.start("ollama")
+    eventually(lambda: snapshot(manager, "ollama")["state"] == "running")
+    options = fake.calls[0][2]
+    assert options["creationflags"] == 512 and "start_new_session" not in options
+    manager.stop("ollama")
+    eventually(lambda: snapshot(manager, "ollama")["state"] == "stopped")
+
+
+def test_health_accepts_reviewed_ollama_patch_version(monkeypatch):
+    def response(request):
+        key = (request.url.port, request.url.path)
+        value = {"version": "0.40.5"} if key == (11435, "/api/version") else HEALTH[key]
+        return httpx.Response(200, json=value)
+    mock_health(monkeypatch, response)
+    assert runtime._probe("ollama") == "ready"

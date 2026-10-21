@@ -1,0 +1,51 @@
+name: Portable checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-core:
+    name: Python and UI checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      DO_NOT_TRACK: "1"
+      OTEL_SDK_DISABLED: "true"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ".node-version"
+          package-manager-cache: false
+      - name: Install application and synthetic-test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Test portable image and local inference boundaries
+        run: >-
+          python -m pytest -q
+          tests/test_visual_inputs.py
+          tests/test_visual_detection.py
+          tests/test_pdf_visual_regions.py
+          tests/test_vision.py
+          tests/test_vision_crops.py
+          tests/test_windows_workspace.py
+          tests/test_visual_errors.py
+          tests/test_vision_setup.py
+          tests/test_d3_server.py
+          tests/test_d3_portability.py
+      - name: Test browser workflow with synthetic fixtures
+        run: node tests/frontend.cjs

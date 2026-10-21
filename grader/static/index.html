@@ -20,7 +20,7 @@
   <main>
     <section class="intro" aria-labelledby="page-title">
       <div><p class="eyebrow">YOUR RUBRIC. YOUR JUDGMENT.</p><h1 id="page-title">Make room for<br><em>thoughtful grading.</em></h1><p class="intro-copy">Turn your criteria into a consistent first pass.<br>Read, review, and keep the final decision yours.</p></div>
-      <aside class="privacy-note"><span class="note-icon" aria-hidden="true">⌁</span><p><strong>A little more private.</strong>Your text and rubric stay on this computer. Grading uses local decision models; images are ignored.</p><span class="note-foot">NO CLOUD INFERENCE · NO ACCOUNT</span></aside>
+      <aside class="privacy-note"><span class="note-icon" aria-hidden="true">⌁</span><p><strong>A little more private.</strong>Your text, images, and rubric stay on this computer. Review image descriptions before sending them to your local decision models.</p><span class="note-foot">NO CLOUD INFERENCE · NO ACCOUNT</span></aside>
     </section>
 
     <details id="model-settings" class="settings-panel">
@@ -36,8 +36,14 @@
         </section>
         <div class="section-label"><h3>Configured models</h3><span id="model-count" class="muted">0 / 8 configured</span></div>
         <div id="model-list" class="model-config-grid"></div>
+        <details class="model-guide vision-settings">
+          <summary>Image and diagram recognition</summary>
+          <div class="field"><label class="vision-review-check" for="vision-auto-detect"><input id="vision-auto-detect" type="checkbox" checked> Automatically detect visual content in uploaded PDF and Word submissions</label><p class="field-help">The normal submission upload extracts text and finds images or visual pages together. Review detected content below; no second upload is needed. Local analysis starts only when you choose Analyze locally.</p></div>
+          <div class="field"><label class="vision-review-check" for="vision-detailed-crops"><input id="vision-detailed-crops" type="checkbox" checked> Read detailed crops for diagrams and small text</label><p class="field-help">Reads an overview plus overlapping regions from each visual, one at a time. This takes longer but preserves more detail. Review disagreements between regions before adding their text.</p></div>
+          <div class="field"><label for="vision-model">Installed vision model</label><input id="vision-model" type="search" list="vision-model-options" value="openbmb/minicpm-v4.7:1b" placeholder="Search or enter an installed vision model…" maxlength="200" spellcheck="false"><datalist id="vision-model-options"><option value="openbmb/minicpm-v4.7:1b">MiniCPM-V 4.7 · 1B</option><option value="qwen3.5:2b-q4_K_M">Qwen3.5 · 2B</option></datalist><p class="field-help">Uses the dedicated local Ollama service on port 11435. Selection never downloads a model. <a href="/setup#vision" target="_blank" rel="noopener">Windows, Linux, and macOS setup</a>.</p></div>
+        </details>
         <div class="workspace-config-actions toolbar"><button id="save-workspace" class="button button-secondary" type="button">Save workspace</button><button id="load-workspace" class="small-button" type="button">Load saved</button><button id="export-workspace" class="small-button" type="button">Export configuration</button><button id="import-workspace" class="small-button" type="button">Import configuration</button><input id="workspace-file" type="file" accept=".json,application/json" hidden></div>
-        <p class="field-help workspace-privacy">Save, import, and export include only model and explanation settings. Rubric content, assignment details, instructor guidance, student text, grades, and notes are excluded. Nothing is saved automatically.</p>
+        <p class="field-help workspace-privacy">Save, import, and export include only model, explanation, and vision settings. Rubric content, assignment details, instructor guidance, student text, images, grades, and notes are excluded. Nothing is saved automatically.</p>
         <p id="workspace-status" class="inline-status" role="status" aria-live="polite"></p>
         <details class="local-services" open>
           <summary>Bundled local servers</summary>
@@ -85,9 +91,37 @@
       </section>
 
       <section class="panel submission-panel" aria-labelledby="submission-heading">
-        <div class="panel-header"><div><p class="step-label">02 / READ</p><h2 id="submission-heading">The submission</h2></div><span class="text-only-label">TEXT ONLY</span></div>
-        <p class="panel-description">Paste the work, or extract text from a document.</p>
-        <label id="submission-drop" class="upload-zone" for="submission-file"><span class="upload-icon" aria-hidden="true">↥</span><span><strong>Choose a document <span>or drop it here</span></strong><small>TXT, PDF, or Word (.docx) · images ignored</small></span><input id="submission-file" type="file" accept=".txt,.pdf,.docx" class="file-input"></label>
+        <div class="panel-header"><div><p class="step-label">02 / READ</p><h2 id="submission-heading">The submission</h2></div><span class="text-only-label">LOCAL INPUT</span></div>
+        <p class="panel-description">Paste the work or upload a submission. Document text and detected visuals appear together for review.</p>
+        <label id="submission-drop" class="upload-zone" for="submission-file"><span class="upload-icon" aria-hidden="true">↥</span><span><strong>Choose a submission <span>or drop it here</span></strong><small>TXT, PDF, Word (.docx), PNG, JPEG, or WebP · up to 15 MB</small></span><input id="submission-file" type="file" accept=".txt,.pdf,.docx,.png,.jpg,.jpeg,.webp" class="file-input"></label>
+        <details id="vision-panel" class="vision-panel">
+          <summary>Images and diagrams <span class="optional">local · review before grading</span></summary>
+          <div class="vision-content">
+            <p class="field-help">Native PDF text stays in the submission. Embedded screenshots and images are read separately; pages with vector drawings use a page preview. Analyze one visual at a time, check the draft, then add reviewed content to the submission. Manage automatic detection and the vision model in Model workspace.</p>
+            <details class="vision-extra-file"><summary>Choose an additional visual file <span class="optional">optional</span></summary><div class="field"><label for="vision-file">Additional image or document</label><input id="vision-file" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.docx"><p class="field-help">Use only when adding a separate visual or selecting a document manually. PDF and Word submissions normally need just the main upload.</p></div></details>
+            <div id="vision-detected" class="field" hidden><label for="vision-detected-select">Detected visual content</label><select id="vision-detected-select"></select><p id="vision-detected-summary" class="field-help"></p></div>
+            <div id="vision-preview" hidden>
+              <div class="vision-page-controls"><label for="vision-index">Page / image</label><input id="vision-index" type="number" min="1" max="1" step="1" value="1"><span id="vision-count" class="field-help"></span><button id="vision-show-page" class="small-button" type="button">Show page / image</button></div>
+              <div id="vision-image-controls" class="field" hidden><label for="vision-image-index">Visual on this PDF page</label><select id="vision-image-index"></select></div>
+              <p id="vision-source" class="field-help"></p>
+              <img id="vision-image" class="vision-image" alt="" decoding="async">
+              <details id="vision-native" class="vision-native" hidden><summary>Native PDF text · unchanged</summary><p id="vision-native-note" class="field-help"></p><label for="vision-native-text">Native PDF text from this page</label><textarea id="vision-native-text" rows="5" readonly spellcheck="false"></textarea></details>
+              <div id="vision-warnings" class="notice" role="status" hidden></div>
+            </div>
+            <div class="toolbar vision-toolbar"><button id="vision-analyze" class="button button-secondary" type="button" disabled>Analyze locally</button><button id="vision-clear" class="text-button" type="button" disabled>Clear image</button></div>
+            <div id="vision-analysis" hidden>
+              <p id="vision-analysis-model" class="field-help"></p>
+              <div id="vision-transcription-field" class="field"><label for="vision-transcription">Transcribed text <span class="optional">editable</span></label><textarea id="vision-transcription" rows="5" spellcheck="false" placeholder="Literal text, labels, and values visible in the image…"></textarea></div>
+              <div class="field"><label for="vision-description">Visual description <span class="optional">editable · AI-assisted</span></label><textarea id="vision-description" rows="5" spellcheck="false" placeholder="Chart trends, diagram relationships, or other visual content…"></textarea></div>
+              <details id="vision-views" class="vision-views" hidden><summary>Compare overview and crop drafts</summary><p class="field-help">These are the model’s original drafts. Overlapping regions can repeat or disagree; correct the editable text above before adding it. Crops do not establish relationships outside their visible region.</p><div id="vision-view-results"></div></details>
+              <div id="vision-uncertainties" class="notice" role="status" hidden></div>
+              <label class="vision-review-check" for="vision-reviewed"><input id="vision-reviewed" type="checkbox"> I checked the transcription and description against the image and corrected any errors.</label>
+              <button id="vision-append" class="button button-secondary" type="button" disabled>Add reviewed content to submission</button>
+              <p class="field-help">Only the reviewed text is sent to the decision models. Existing submission text is kept. Adding content clears outdated grading results so you can grade again.</p>
+            </div>
+            <p id="vision-status" class="inline-status" role="status" aria-live="polite"></p>
+          </div>
+        </details>
         <div class="submission-meta"><label for="submission-name">Submission name <span class="optional">optional</span></label><input id="submission-name" type="text" placeholder="e.g. Essay — draft 01" maxlength="250"></div>
         <div class="text-editor-header"><label for="submission-text">Text to grade</label><span class="editor-actions"><button id="clear-submission" class="text-button" type="button" title="Clear this submission and its grade while keeping your rubric, assignment details, and instructor guidance">Next student</button></span></div>
         <textarea id="submission-text" class="submission-text" spellcheck="false" placeholder="Paste your submission here…&#10;&#10;Imported text appears here, ready for you to check and edit before grading."></textarea>

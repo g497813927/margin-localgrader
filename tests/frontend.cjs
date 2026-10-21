@@ -10,7 +10,7 @@ function setup() {
     set id(value) { this._id = value; elements.set(value, this); } get id() { return this._id; }
     set type(value) { if (this.tagName === 'select') throw new TypeError('HTMLSelectElement.type is read-only'); this._type = value; } get type() { return this.tagName === 'select' ? 'select-one' : this._type; }
     set textContent(value) { this._text = String(value); this.children = []; } get textContent() { return this._text + this.children.map(item => item.textContent).join(''); }
-    setAttribute(name,value) { (this.attributes ||= {})[name]=String(value); } addEventListener(name, fn) { this.listeners.set(name, fn); }
+    setAttribute(name,value) { (this.attributes ||= {})[name]=String(value); } removeAttribute(name) { delete (this.attributes ||= {})[name]; if (name === 'src') this.src = ''; } addEventListener(name, fn) { this.listeners.set(name, fn); }
     replaceChildren(...items) { this.children = items; } append(...items) { this.children.push(...items); }
     querySelectorAll(selector) { return this.children.flatMap(item => [(selector.startsWith('.') ? (item.className || '').split(' ').includes(selector.slice(1)) : item.tagName === selector) ? item : null, ...item.querySelectorAll(selector)]).filter(Boolean); }
     get lastElementChild() { return this.children.at(-1) || null; }
@@ -23,9 +23,9 @@ function setup() {
     document: { getElementById: get, createElement: tag => new Element(tag), querySelector: () => new Element(), querySelectorAll: () => [], body: new Element() },
     window: { addEventListener: (name, fn) => windowEvents.set(name, fn), matchMedia: () => ({ matches: true }) },
     fetch: (url, options) => new Promise(resolve => { pending = { url, options, resolve }; requests.push(pending); }),
-    FormData: class { append(){} }, URL, Blob, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, crypto: webcrypto
+    FormData: class { constructor(){this.values=new Map();} append(key,value){this.values.set(key,value);} get(key){return this.values.get(key);} }, URL, Blob, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, crypto: webcrypto
   });
-  const code = original.replace('  init();\n})();', '  globalThis.__test = { state, activeRequests, bindEvents, grade, extractFile, exportResult, resultCsvRows, refreshTotal, clearSubmission, normalizeRubric, validate, renderSettings, renderPicker, renderResults, init, modelSettings, currentModels, selectedEntries, addModel, moveModel, removeModel, workspaceSnapshot, normalizeWorkspace, applyWorkspace, workspaceAction, refreshRuntimes, runtimeAction, stopRuntimePolling };\n})();');
+  const code = original.replace('  init();\n})();', '  globalThis.__test = { state, activeRequests, bindEvents, grade, extractFile, prepareVision, analyzeVision, appendVision, clearVision, exportResult, resultCsvRows, refreshTotal, clearSubmission, normalizeRubric, validate, renderSettings, renderPicker, renderResults, init, modelSettings, currentModels, selectedEntries, addModel, moveModel, removeModel, workspaceSnapshot, normalizeWorkspace, applyWorkspace, workspaceAction, refreshRuntimes, runtimeAction, stopRuntimePolling };\n})();');
   vm.runInContext(code, context);
   const test = context.__test;
   test.state.rubric = { title: 'Synthetic rubric', instructions: '', criteria: [{ id: 'c', name: 'Reasoning', description: 'Explain the reasoning clearly.', levels: [{ id:'yes', label:'Demonstrated', description:'', points:9 }, {id:'no',label:'Not demonstrated',description:'',points:0}] }] };
@@ -314,7 +314,7 @@ const respond=(request,data,ok=true)=>request.resolve({ok,json:async()=>data});
     test.state.result=result;test.state.comparison={results:[{ok:true,label:'A',result}],comparison:[]};test.state.overrides={c:{points:7,note:'PRIVATE review'}};
     const save=test.workspaceAction('save'),body=JSON.parse(pending().options.body);
     assert.equal(pending().url,'/api/workspace');assert.equal(pending().options.method,'PUT');
-    assert.deepEqual(Object.keys(body).sort(),['explanation_settings','models','schema_version']);assert.doesNotMatch(JSON.stringify(body),/PRIVATE/);
+    assert.deepEqual(Object.keys(body).sort(),['explanation_settings','models','schema_version','vision_settings']);assert.doesNotMatch(JSON.stringify(body),/PRIVATE/);
     respond(pending(),{workspace:body,saved:true});await save;
     assert.equal(test.state.result,result,'Saving configuration does not change grading state');assert.equal(test.state.overrides.c.points,7);
     const replacement={...body,models:[body.models[1]],explanation_settings:{enabled:true,model:'another-installed:4b'}};
@@ -567,5 +567,196 @@ const respond=(request,data,ok=true)=>request.resolve({ok,json:async()=>data});
     assert.equal(rows[2][headers.indexOf('Advisory best-fit rubric points')],'');
     assert.equal(requests.filter(request=>request.url==='/api/compare').length,1);
   }
-  console.log('PASS: generic blank startup/reset and rubric creation/import; dynamic model workspace plus historical four-model settings/payload/render/export/probes/failure/stale behavior; legacy two-result export; provisional/strict scoring, independent instructor0, guidance, agreement/disagreement advisory eligibility, unchanged scores, separate exports, retry deduplication, and stale rejection, and privacy lifecycle checks.');
+  // Visual recognition is review-only until an explicit, checked append action.
+  {
+    const {test,get,result,pending,requests}=setup();test.bindEvents();
+    const file={name:'synthetic-diagram.pdf',size:100};
+    const preview={image_data_url:'data:image/png;base64,AAAA',width:120,height:80,index:1,count:3,source_label:'synthetic-diagram.pdf · page 1',warnings:['<img src=x onerror=alert(1)> is plain text']};
+    const comparison={results:[{label:'A',ok:true,result},{label:'B',ok:true,result}],comparison:[]};
+    test.state.result=result;test.state.comparison=comparison;test.state.overrides={c:{points:7,note:'Instructor note'}};
+    get('submission-text').value='Existing synthetic response.';
+    const preparing=test.prepareVision(file);
+    assert.equal(pending().url,'/api/vision/prepare');assert.equal(pending().options.body.get('file'),file);assert.equal(pending().options.body.get('index'),'1');
+    assert.equal(get('grade-button').disabled,true);
+    respond(pending(),preview);await preparing;
+    assert.equal(get('vision-image').src,preview.image_data_url);assert.equal(get('vision-preview').hidden,false);
+    assert.equal(get('vision-warnings').querySelectorAll('img').length,0);assert.match(get('vision-warnings').textContent,/<img/);
+    assert.equal(test.state.result,result);assert.equal(test.state.comparison,comparison);assert.equal(test.state.overrides.c.points,7);
+    const analyzing=test.analyzeVision();
+    assert.equal(pending().url,'/api/vision/analyze');
+    assert.deepEqual(JSON.parse(pending().options.body),{image_data_url:preview.image_data_url,model:'openbmb/minicpm-v4.7:1b',detailed_crops:true,transcribe:true});
+    const count=requests.length;await test.grade();assert.equal(requests.length,count,'Grading waits for the current vision request');
+    respond(pending(),{model:'openbmb/minicpm-v4.7:1b',transcription:'<script>student text</script>',description:'A points to B.',uncertainties:['<img src=evil> uncertain label']});await analyzing;
+    assert.equal(get('vision-transcription').value,'<script>student text</script>');assert.equal(get('vision-uncertainties').querySelectorAll('img').length,0);
+    assert.equal(test.state.result,result);assert.equal(test.state.comparison,comparison);assert.equal(test.state.overrides.c.points,7,'Recognition leaves original instructor scores unchanged');
+    assert.equal(get('submission-text').value,'Existing synthetic response.');
+    test.appendVision();assert.equal(get('submission-text').value,'Existing synthetic response.','Unchecked analysis cannot enter grading input');
+    get('vision-reviewed').checked=true;get('vision-reviewed').listeners.get('change')();assert.equal(get('vision-append').disabled,false);
+    get('vision-description').value='A points to C.';get('vision-description').listeners.get('input')();assert.equal(get('vision-reviewed').checked,false,'Any edit must be reviewed again');
+    get('vision-reviewed').checked=true;get('vision-reviewed').listeners.get('change')();test.appendVision();
+    assert.match(get('submission-text').value,/^Existing synthetic response\./);assert.match(get('submission-text').value,/Reviewed image evidence: synthetic-diagram\.pdf · page 1/);
+    assert.match(get('submission-text').value,/AI-assisted visual description \(reviewed\):\nA points to C\./);
+    assert.match(get('submission-text').value,/Recognition uncertainties to consider/);assert.equal(test.state.result,null);assert.equal(test.state.comparison,null);
+    const appended=get('submission-text').value;get('vision-reviewed').checked=true;test.appendVision();assert.equal(get('submission-text').value,appended,'Repeated append clicks do not duplicate evidence');
+    get('vision-index').value='2';const nextPage=get('vision-show-page').listeners.get('click')();assert.equal(pending().options.body.get('index'),'2');assert.equal(test.state.vision.analysis,null);assert.equal(get('vision-transcription').value,'');
+    respond(pending(),{...preview,index:2,source_label:'synthetic-diagram.pdf · page 2'});await nextPage;
+    assert.equal(get('vision-index').value,'2');assert.equal(get('submission-text').value,appended,'Changing the preview leaves already reviewed evidence alone');
+    const settings=test.workspaceSnapshot();assert.equal(settings.vision_settings.model,'openbmb/minicpm-v4.7:1b');assert.doesNotMatch(JSON.stringify(settings),/synthetic-diagram|A points|image_data_url|student text|uncertain label/);
+    assert.throws(()=>test.normalizeWorkspace({...settings,vision_settings:{...settings.vision_settings,image_data_url:preview.image_data_url}}),/installed local Ollama vision model/);
+    const html=fs.readFileSync(require('node:path').join(__dirname,'../grader/static/index.html'),'utf8');
+    assert.match(html,/<details id="vision-panel" class="vision-panel">/,'Visual content starts collapsed');
+    assert.match(html,/Windows, Linux, and macOS setup/);assert.doesNotMatch(html,/images are ignored|TEXT ONLY/);
+  }
+  // Late prepare/analyze responses cannot restore a cleared or replaced student's image.
+  for(const phase of ['prepare','analyze'])for(const action of ['next','pagehide','replace','model-change','detail-change','reset']) {
+    const {test,get,pending,windowEvents}=setup();test.bindEvents();
+    test.state.defaults={rubric:test.state.rubric,models:test.state.models,explanationSettings:test.state.explanationSettings,visionSettings:{model:'openbmb/minicpm-v4.7:1b'}};
+    const file={name:'synthetic.png',size:10},preview={image_data_url:'data:image/png;base64,AAAA',width:20,height:20,index:1,count:1,source_label:'synthetic.png',warnings:[]};
+    let request=test.prepareVision(file);
+    if(phase==='analyze'){respond(pending(),preview);await request;request=test.analyzeVision();}
+    const oldRequest=pending();let replacement;
+    if(action==='next')test.clearSubmission();
+    if(action==='pagehide')windowEvents.get('pagehide')();
+    if(action==='replace')replacement=test.prepareVision({name:'replacement.webp',size:20});
+    if(action==='model-change'){get('vision-model').value='qwen3.5:2b-q4_K_M';get('vision-model').listeners.get('input')();}
+    if(action==='detail-change'){get('vision-detailed-crops').checked=false;get('vision-detailed-crops').listeners.get('change')();}
+    if(action==='reset')get('forget-workspace').listeners.get('click')();
+    assert.equal(oldRequest.options.signal.aborted,true,`${phase}/${action}: old local request is aborted`);
+    respond(oldRequest,phase==='prepare'?preview:{model:'old',transcription:'STALE IMAGE TEXT',description:'STALE DIAGRAM',uncertainties:['STALE']});await request;
+    assert.equal(test.state.vision.analysis,null);assert.equal(get('vision-transcription').value,'');assert.equal(get('vision-description').value,'');assert.equal(get('submission-text').value,'');
+    if(['next','pagehide','reset'].includes(action)){assert.equal(test.state.vision.file,null);assert.equal(test.state.vision.prepared,null);assert.equal(get('vision-image').src,'');assert.equal(get('vision-status').textContent,'');}
+    if(action==='replace'){assert.equal(test.state.vision.busy,true,'Old finally does not reset a newer request');respond(pending(),{...preview,source_label:'replacement.webp'});await replacement;assert.match(get('vision-source').textContent,/replacement.webp/);}
+  }
+  {
+    const {test,get,pending,requests}=setup();test.bindEvents();
+    await test.prepareVision({name:'too-large.png',size:15*1024*1024+1});await test.prepareVision({name:'unsafe.svg',size:100});assert.equal(requests.length,0);
+    get('vision-file').files=[{name:'a.png',size:10},{name:'b.png',size:10}];await get('vision-file').listeners.get('change')();assert.equal(requests.length,0);assert.match(get('vision-status').textContent,/one image or document/);
+    for(const unsafe of ['https://remote.example/image.png','data:image/svg+xml;base64,AAAA','javascript:alert(1)']){
+      const preparing=test.prepareVision({name:'synthetic.png',size:10});respond(pending(),{image_data_url:unsafe,index:1,count:1});await preparing;
+      assert.equal(test.state.vision.prepared,null);assert.equal(get('vision-image').src,'');assert.match(get('vision-status').textContent,/invalid image preview/);
+    }
+    const preparing=test.prepareVision({name:'synthetic.png',size:10});respond(pending(),{image_data_url:'data:image/png;base64,AAAA',index:1,count:1,width:20,height:20,warnings:[]});await preparing;
+    const analyzing=test.analyzeVision();respond(pending(),{error:'Install the selected local vision model first.'},false);await analyzing;
+    assert.equal(test.state.vision.analysis,null);assert.equal(get('submission-text').value,'');assert.match(get('vision-status').textContent,/Install/);assert.equal(get('vision-append').disabled,true);
+    get('vision-model').value='https://remote.example/model';get('vision-model').listeners.get('input')();const count=requests.length;await test.analyzeVision();assert.equal(requests.length,count);
+    assert.match(get('vision-status').textContent,/installed local vision model/);
+  }
+  // One normal document upload extracts text and reuses its File for detected visuals.
+  for(const extension of ['pdf','docx']){
+    const {test,get,pending,requests}=setup();test.bindEvents();
+    const file={name:`mixed.${extension}`,size:200};
+    const visualItems=[{index:2,label:'Page / image 2: synthetic chart'},{index:4,label:'<script>Page / image 4</script>'}];
+    get('submission-file').files=[file];
+    const importing=get('submission-file').listeners.get('change')();
+    assert.equal(pending().url,'/api/extract');assert.equal(pending().options.body.get('file'),file);assert.equal(pending().options.body.get('detect_visuals'),'true');
+    respond(pending(),{text:'Extracted synthetic document text.',filename:file.name,visuals:visualItems,visual_count:5,warnings:[]});await tick();
+    assert.equal(requests.length,2);assert.equal(pending().url,'/api/vision/prepare');assert.equal(pending().options.body.get('file'),file,'Automatic preview reuses the original upload object');assert.equal(pending().options.body.get('index'),'2');
+    respond(pending(),{image_data_url:'data:image/png;base64,AAAA',width:20,height:20,index:2,count:5,source_label:file.name+' page / image 2',warnings:[]});await importing;
+    assert.equal(get('submission-text').value,'Extracted synthetic document text.');assert.equal(get('vision-panel').open,true);assert.equal(get('vision-detected').hidden,false);assert.equal(test.state.vision.file,file);
+    assert.equal(get('vision-detected-select').children.length,2);assert.equal(get('vision-detected-select').querySelectorAll('script').length,0);
+    assert.equal(requests.filter(request=>request.url==='/api/vision/analyze').length,0,'Detection never silently starts inference');
+    get('vision-detected-select').value='4';const switching=get('vision-detected-select').listeners.get('change')();assert.equal(pending().options.body.get('file'),file);assert.equal(pending().options.body.get('index'),'4');
+    respond(pending(),{image_data_url:'data:image/png;base64,AAAA',width:20,height:20,index:4,count:5,source_label:file.name+' page / image 4',warnings:[]});await switching;
+    assert.equal(test.state.vision.detected.length,2);assert.equal(get('vision-detected-select').value,'4');
+    const settings=test.workspaceSnapshot();assert.equal(settings.vision_settings.auto_detect,true);assert.doesNotMatch(JSON.stringify(settings),/mixed\.|synthetic chart|Extracted synthetic|image_data_url/);
+    test.clearSubmission();assert.equal(test.state.vision.detected.length,0);assert.equal(get('vision-detected-select').children.length,0);assert.equal(get('vision-detected').hidden,true);assert.equal(test.state.vision.file,null);
+  }
+  {
+    const {test,get,pending,requests,result}=setup();test.bindEvents();test.renderSettings();
+    get('vision-auto-detect').checked=false;get('vision-auto-detect').listeners.get('change')();assert.equal(test.state.visionSettings.auto_detect,false);assert.equal(test.workspaceSnapshot().vision_settings.auto_detect,false);
+    const old=test.workspaceSnapshot();delete old.vision_settings.auto_detect;assert.equal(test.normalizeWorkspace(old).vision_settings.auto_detect,true,'Older model-only configuration enables the new default');
+    assert.throws(()=>test.normalizeWorkspace({...old,vision_settings:{...old.vision_settings,auto_detect:'yes'}}),/enabled or disabled/);
+    const importing=test.extractFile({name:'opt-out.pdf',size:100},'submission');assert.equal(pending().options.body.get('detect_visuals'),'false');respond(pending(),{text:'Text only by choice.',visuals:[{index:1,label:'Must not prepare'}],warnings:[]});await importing;
+    assert.equal(requests.length,1);assert.equal(test.state.vision.file,null);assert.equal(get('submission-text').value,'Text only by choice.');
+    test.state.result=result;const revision=test.state.revision;
+    const file={name:'standalone.webp',size:100};get('submission-file').files=[file];const imageImport=get('submission-file').listeners.get('change')();
+    assert.equal(pending().url,'/api/vision/prepare','Standalone image uses the same main picker');respond(pending(),{image_data_url:'data:image/png;base64,AAAA',width:20,height:20,index:1,count:1,source_label:file.name,warnings:[]});await imageImport;
+    assert.equal(test.state.result,result);assert.equal(test.state.revision,revision);assert.equal(get('submission-text').value,'Text only by choice.','An image draft does not overwrite existing text');assert.equal(get('vision-panel').open,true);
+    assert.equal(requests.filter(request=>request.url==='/api/extract').length,1);
+  }
+  for(const action of ['edit','next','pagehide','opt-out']){
+    const {test,get,pending,requests,windowEvents}=setup();test.bindEvents();
+    const importing=test.extractFile({name:'stale.pdf',size:100},'submission');
+    if(action==='edit'){get('submission-text').value='Newer text';get('submission-text').listeners.get('input')();}
+    if(action==='next')test.clearSubmission();
+    if(action==='pagehide')windowEvents.get('pagehide')();
+    if(action==='opt-out'){get('vision-auto-detect').checked=false;get('vision-auto-detect').listeners.get('change')();}
+    respond(pending(),{text:'Old extracted text',visuals:[{index:1,label:'Stale chart'}],warnings:[]});await importing;
+    assert.equal(requests.length,1,`${action}: no late automatic preview starts`);assert.equal(test.state.vision.file,null);assert.equal(test.state.vision.detected.length,0);
+    if(action==='edit')assert.equal(get('submission-text').value,'Newer text');
+    if(['next','pagehide'].includes(action))assert.equal(get('submission-text').value,'');
+  }
+  // PDF native text is never sent to vision or overwritten by its recognition draft.
+  for(const nativeImported of [true,false]) {
+    const {test,get,pending,result}=setup();test.bindEvents();
+    const file={name:'synthetic-vector.pdf',size:200};
+    const native='SELECT * FROM teams WHERE team_id = ?;  \n\n';
+    const preview={image_data_url:'data:image/png;base64,AAAA',width:2200,height:1800,index:2,count:3,image_index:0,image_count:0,kind:'pdf_vectors',native_text:native,source_label:'synthetic-vector.pdf · page 2',warnings:[]};
+    get('submission-text').value=nativeImported?native:'Unchanged original text.  \n';
+    const originalText=get('submission-text').value;
+    test.state.result=result;test.state.overrides={c:{points:8,note:'Keep this score'}};const revision=test.state.revision;
+    const preparing=test.prepareVision(file,2,[],0,nativeImported);respond(pending(),preview);await preparing;
+    assert.equal(get('vision-native-text').value,native);assert.equal(get('vision-native').hidden,false);
+    const analyzing=test.analyzeVision(),payload=JSON.parse(pending().options.body);
+    assert.equal(payload.transcribe,false);assert.equal(payload.detailed_crops,true);assert.equal(payload.native_text,undefined);assert.doesNotMatch(JSON.stringify(payload),/SELECT|team_id/);
+    const view={label:'Overview',bounds:[0,0,2200,1800],transcription:'WRONG OCR 7',description:'Two linked nodes.',uncertainties:[]};
+    respond(pending(),{model:'local',transcription:'WRONG OCR 7',description:'Two linked nodes.',uncertainties:[],views:[view],view_count:1});await analyzing;
+    assert.equal(get('vision-transcription-field').hidden,true);assert.equal(get('vision-transcription').value,'');
+    assert.equal(get('submission-text').value,originalText);assert.equal(test.state.result,result);assert.equal(test.state.overrides.c.points,8);assert.equal(test.state.revision,revision);
+    assert.doesNotMatch(get('vision-view-results').textContent,/WRONG OCR/);assert.equal(get('vision-view-results').children.length,1);
+    get('vision-reviewed').checked=true;test.appendVision();
+    const appended=get('submission-text').value;
+    assert.ok(appended.startsWith(originalText+'\n\n'),'Appending preserves every character of the existing native text, including trailing whitespace');
+    assert.equal(appended.split('team_id = ?').length-1,1,'Native text appears exactly once');
+    assert.doesNotMatch(appended,/WRONG OCR/);assert.match(appended,/Two linked nodes/);
+    if(!nativeImported){assert.match(appended,/Native PDF text \(verbatim\):/);assert.ok(appended.includes(native));}
+    else assert.doesNotMatch(appended,/Native PDF text \(verbatim\):/);
+    assert.equal(test.state.result,null,'Only explicit reviewed append invalidates outdated grades');
+    test.clearSubmission();assert.equal(get('vision-native-text').value,'');assert.equal(get('vision-native').hidden,true);assert.equal(get('vision-view-results').children.length,0);assert.equal(test.state.vision.nativeImported,false);
+  }
+  // Two embedded images on one PDF page remain distinct through automatic/manual selection.
+  {
+    const {test,get,pending}=setup();test.bindEvents();
+    const file={name:'synthetic-multi-image.pdf',size:300};
+    const visuals=[{index:2,image_index:1,kind:'pdf_image',label:'Page 2 · image 1'},{index:2,image_index:2,kind:'pdf_image',label:'Page 2 · image 2'},{index:3,image_index:0,kind:'pdf_vectors',label:'Page 3 · diagram'}];
+    const importing=test.extractFile(file,'submission');
+    respond(pending(),{text:'Native SQL: SELECT ?;\n',filename:file.name,visuals,warnings:[]});await tick();
+    assert.equal(pending().options.body.get('index'),'2');assert.equal(pending().options.body.get('image_index'),'1');
+    const preview={image_data_url:'data:image/png;base64,AAAA',width:1800,height:1000,index:2,count:3,image_index:1,image_count:2,kind:'pdf_image',native_text:'Native SQL: SELECT ?;',source_label:'Page 2 · image 1',warnings:[]};
+    respond(pending(),preview);await importing;
+    assert.equal(get('vision-detected-select').value,'2:1');assert.equal(get('vision-image-index').value,'1');assert.equal(get('vision-image-controls').hidden,false);
+    assert.equal(get('vision-image-index').children.length,3);assert.equal(test.state.vision.nativeImported,true);
+    get('vision-detected-select').value='2:2';const choosing=get('vision-detected-select').listeners.get('change')();
+    assert.equal(pending().options.body.get('index'),'2');assert.equal(pending().options.body.get('image_index'),'2');assert.equal(pending().options.body.get('file'),file);
+    respond(pending(),{...preview,image_index:2,source_label:'Page 2 · image 2'});await choosing;
+    assert.equal(get('vision-image-index').value,'2');assert.equal(test.state.vision.nativeImported,true);
+    get('vision-image-index').value='0';const page=get('vision-image-index').listeners.get('change')();
+    assert.equal(pending().options.body.get('image_index'),'0');respond(pending(),{...preview,image_index:0,kind:'pdf_vectors'});await page;
+    assert.equal(get('submission-text').value,'Native SQL: SELECT ?;\n');
+    get('vision-detailed-crops').checked=false;get('vision-detailed-crops').listeners.get('change')();
+    const settings=test.workspaceSnapshot();assert.equal(settings.vision_settings.detailed_crops,false);
+    const old=JSON.parse(JSON.stringify(settings));delete old.vision_settings.detailed_crops;assert.equal(test.normalizeWorkspace(old).vision_settings.detailed_crops,true);
+    assert.throws(()=>test.normalizeWorkspace({...settings,vision_settings:{...settings.vision_settings,detailed_crops:'yes'}}),/enabled or disabled/);
+    test.applyWorkspace({...settings,vision_settings:{...settings.vision_settings,detailed_crops:true}});test.renderSettings();assert.equal(get('vision-detailed-crops').checked,true);
+    const analyzing=test.analyzeVision();respond(pending(),{model:'local',transcription:'',description:'A diagram.',uncertainties:[],views:[{label:'<script>Crop 1</script>',bounds:[0,0,900,600],transcription:'',description:'<img src=x>',uncertainties:[]}],view_count:1});await analyzing;
+    assert.equal(get('vision-view-results').querySelectorAll('script').length,0);assert.equal(get('vision-view-results').querySelectorAll('img').length,0);assert.match(get('vision-view-results').textContent,/<img src=x>/);
+  }
+  // Failed crop content is never evidence; successful views remain drafts with explicit partial status.
+  for(const invalidPartial of [false,true]) {
+    const {test,get,pending,result}=setup();test.bindEvents();
+    get('submission-text').value='Existing native text.';test.state.result=result;
+    test.state.overrides={c:{points:8,note:'Keep'}};const revision=test.state.revision;
+    const preparing=test.prepareVision({name:'synthetic.png',size:200},1);
+    respond(pending(),{image_data_url:'data:image/png;base64,AAAA',width:1000,height:700,index:1,count:1,source_label:'Synthetic',warnings:[]});await preparing;
+    const analyzing=test.analyzeVision();
+    const warning='Recognition failed; this is not missing student work.';
+    respond(pending(),{model:'local',transcription:'Completed text',description:'A visible node.',uncertainties:[warning],incomplete_views:1,views:[
+      {label:'Whole image',bounds:[0,0,1000,700],transcription:'Completed text',description:'A visible node.',uncertainties:[],status:'complete'},
+      {label:'Detail',bounds:[0,0,560,400],transcription:invalidPartial?'Unvalidated content':'',description:'',uncertainties:[warning],status:'incomplete',error:warning}
+    ]});await analyzing;
+    assert.equal(get('submission-text').value,'Existing native text.');assert.equal(test.state.result,result);assert.equal(test.state.overrides.c.points,8);assert.equal(test.state.revision,revision);
+    if(invalidPartial){assert.equal(test.state.vision.analysis,null);assert.match(get('vision-status').textContent,/invalid partial/);}
+    else {assert.match(get('vision-status').textContent,/Partial reading: 1 of 2/);assert.match(get('vision-view-results').textContent,/Could not read this view/);assert.equal(get('vision-transcription').value,'Completed text');assert.equal(get('vision-reviewed').checked,false);}
+  }
+  console.log('PASS: native PDF text and SQL preserved verbatim; separate embedded image selection and local crop drafts; partial-view failures explicit; persisted detail settings, stale-request cancellation, safe rendering and unchanged scores during recognition; existing upload/rubric/model/grading/explanation/privacy checks.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

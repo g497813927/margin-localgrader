@@ -9,11 +9,12 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from .schemas import ExplanationSettings, Level, Settings, StrictModel, model_identity
+from .schemas import ExplanationSettings, Level, Settings, StrictModel, VisionSettings, model_identity
 from pydantic import field_validator
 
 MAX_WORKSPACE_BYTES = 65536
 ROOT = Path(__file__).resolve().parents[1]
+WINDOWS = os.name == "nt"
 
 
 class WorkspaceEntry(StrictModel):
@@ -29,6 +30,7 @@ class Workspace(StrictModel):
     schema_version: int = Field(default=1, strict=True, ge=1, le=1)
     models: list[WorkspaceEntry] = Field(max_length=8)
     explanation_settings: ExplanationSettings = Field(default_factory=ExplanationSettings)
+    vision_settings: VisionSettings = Field(default_factory=VisionSettings)
 
     @model_validator(mode="after")
     def unique_models(self):
@@ -102,6 +104,8 @@ class WorkspaceStore:
 
     def load(self):
         with self.lock:
+            if WINDOWS:
+                return self._load_windows()
             try:
                 directory = self._open_directory()
             except FileNotFoundError:
@@ -126,6 +130,9 @@ class WorkspaceStore:
         if len(data) > MAX_WORKSPACE_BYTES:
             raise ValueError("Workspace settings are too large.")
         with self.lock:
+            if WINDOWS:
+                self._save_windows(data)
+                return checked
             directory = self._open_directory(create=True)
             temporary = ".workspace-" + secrets.token_hex(12)
             created = False
@@ -146,3 +153,36 @@ class WorkspaceStore:
                     os.unlink(temporary, dir_fd=directory)
                 os.close(directory)
         return checked
+
+    def _load_windows(self):
+        from .windows_files import checked_handle, read_settings
+        try:
+            with checked_handle(self.directory, directory=True):
+                data = read_settings(self.directory / self.filename, MAX_WORKSPACE_BYTES)
+        except FileNotFoundError:
+            return default_workspace(), False
+        return parse_workspace(data), True
+
+    def _save_windows(self, data):
+        from .windows_files import checked_handle, read_settings
+        self.directory.mkdir(mode=0o700, exist_ok=True)
+        with checked_handle(self.directory, directory=True):
+            target = self.directory / self.filename
+            try:
+                read_settings(target, MAX_WORKSPACE_BYTES)
+            except FileNotFoundError:
+                pass
+            temporary = self.directory / (".workspace-" + secrets.token_hex(12))
+            created = False
+            try:
+                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o600)
+                created = True
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+                created = False
+            finally:
+                if created:
+                    temporary.unlink()

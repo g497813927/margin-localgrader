@@ -24,7 +24,9 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTED_VERSION = "0.40.3"
+REVIEWED_VERSIONS = ("0.40.3", "0.40.5")
 PORT = 11435
+IS_WINDOWS = os.name == "nt"
 MAX_METADATA_BYTES = 65536
 
 
@@ -36,7 +38,8 @@ def offline_environment(model_cache: Path, inherited=None):
     inherited = os.environ if inherited is None else inherited
     # A small allowlist prevents inherited request logging, native tracing,
     # proxies, remote runners, or alternate model settings from being enabled.
-    environment = {key: inherited[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL")
+    environment = {key: inherited[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL",
+            "SYSTEMROOT", "SystemRoot", "WINDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP")
                    if key in inherited}
     environment.update({
         "OLLAMA_HOST": f"127.0.0.1:{PORT}",
@@ -94,7 +97,8 @@ def check_port():
         try:
             # Match the daemon's restart behavior after closed connections.
             # This permits TIME_WAIT reuse, never sharing an active listener.
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.setsockopt(socket.SOL_SOCKET,
+                socket.SO_EXCLUSIVEADDRUSE if IS_WINDOWS else socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", PORT))
         except OSError:
             raise LaunchError("Local explanation port 11435 is already occupied. Stop its existing process before starting this dedicated daemon.") from None
@@ -104,6 +108,10 @@ def find_binary(explicit: Path | None):
     candidates = ([explicit.expanduser()] if explicit else
                   [Path(found) for found in [shutil.which("ollama")] if found] +
                   [Path("/Applications/Ollama.app/Contents/Resources/ollama")])
+    if IS_WINDOWS and not explicit:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates.append(Path(local) / "Programs/Ollama/ollama.exe")
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate.resolve()
@@ -116,8 +124,8 @@ def check_version(binary: Path, environment: dict):
                                 capture_output=True, text=True, timeout=15, check=False)
         versions = re.findall(r"(?:client version is|ollama version is)\s+(\d+\.\d+\.\d+)",
                               result.stdout + result.stderr)
-        if not versions or any(version != TESTED_VERSION for version in versions):
-            raise LaunchError("Use the verified Ollama 0.40.3 runtime for this launcher. Other versions require a fresh privacy and context-limit review.")
+        if not versions or any(version not in REVIEWED_VERSIONS for version in versions):
+            raise LaunchError("Use a reviewed Ollama runtime (0.40.3 or 0.40.5) for this launcher. Other versions require a fresh privacy and context-limit review.")
     except LaunchError:
         raise
     except Exception:
@@ -141,7 +149,7 @@ def wait_ready(process, timeout=45):
                 if response.status != 200 or len(raw) > MAX_METADATA_BYTES:
                     raise LaunchError("The dedicated Ollama endpoint returned invalid metadata.")
                 metadata = json.loads(raw)
-                if metadata.get("version") != TESTED_VERSION:
+                if metadata.get("version") not in REVIEWED_VERSIONS:
                     raise LaunchError("The dedicated daemon does not match the verified Ollama version.")
                 with client.open(f"http://127.0.0.1:{PORT}/api/status", timeout=1) as status:
                     raw_status = status.read(MAX_METADATA_BYTES + 1)
@@ -159,7 +167,21 @@ def wait_ready(process, timeout=45):
 
 
 def stop_owned(process):
-    if process is None:
+    if process is None or process.poll() is not None:
+        return
+    if IS_WINDOWS:
+        # /T targets only descendants of this still-owned live process. Never
+        # kill by port or executable name; those may belong to another app.
+        system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
+        if not system_root:
+            raise LaunchError("Windows SystemRoot is required to stop the owned local daemon.")
+        result = subprocess.run([str(Path(system_root) / "System32/taskkill.exe"),
+                                 "/PID", str(process.pid), "/T", "/F"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=15, check=False)
+        if result.returncode != 0 and process.poll() is None:
+            raise LaunchError("Could not confirm cleanup of the owned local daemon.")
+        process.wait(timeout=5)
         return
     # This process group was created by this launcher; never find/kill another
     # user's Ollama app or a process inferred only from its listening port.
@@ -179,7 +201,7 @@ def stop_owned(process):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ollama", type=Path, help="Existing Ollama 0.40.3 executable.")
+    parser.add_argument("--ollama", type=Path, help="Existing reviewed Ollama 0.40.3 or 0.40.5 executable.")
     parser.add_argument("--model-cache", type=Path, default=ROOT / "models/ollama-explanations",
                         help="Project-local model store; starts empty until a model is imported.")
     args = parser.parse_args(argv)
@@ -190,9 +212,11 @@ def main(argv=None):
         cache = prepare_model_cache(args.model_cache)
         environment = offline_environment(cache)
         check_version(binary, environment)
+        process_options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+                           else {"start_new_session": True})
         process = subprocess.Popen([str(binary), "serve"], env=environment,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
+                                   stderr=subprocess.DEVNULL, **process_options)
         wait_ready(process)
         print("Local explanation daemon is ready at http://127.0.0.1:11435. Cloud access and request/runtime logs are disabled. Import a verified model separately if the store is empty. Ctrl-C stops this daemon.", flush=True)
         process.wait()
@@ -207,7 +231,10 @@ def main(argv=None):
         print("Could not start the dedicated local explanation daemon. Check installation, cache, and permissions.", file=sys.stderr)
         return 1
     finally:
-        stop_owned(process)
+        try:
+            stop_owned(process)
+        except Exception:
+            print("Could not confirm cleanup of the owned local daemon. Check that process before restarting.", file=sys.stderr)
 
 
 if __name__ == "__main__":
