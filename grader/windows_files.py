@@ -25,11 +25,24 @@ def checked_handle(path, *, directory=False):
     class AttributeInfo(ctypes.Structure):
         _fields_ = [("attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
 
-    # Keep the directory exclusive while path-based settings operations run.
-    # Some Windows filesystems allow a directory rename despite a handle that
-    # shares read/write but denies deletion. File reads still share read/write.
+    class FileIdInfo(ctypes.Structure):
+        _fields_ = [("volume", ctypes.c_ulonglong), ("file_id", ctypes.c_ubyte * 16)]
+
+    def file_identity(open_handle):
+        identity = FileIdInfo()
+        if not kernel.GetFileInformationByHandleEx(open_handle, 18, ctypes.byref(identity),
+                                                   ctypes.sizeof(identity)):
+            raise OSError("Workspace directory identity could not be verified.")
+        file_id = bytes(identity.file_id)
+        if not any(file_id):
+            raise OSError("Workspace directory has no stable file identity.")
+        return identity.volume, file_id
+
+    # Hold the directory handle and verify that its original pathname still
+    # refers to the same object. Windows can rename an open directory even
+    # when its handle does not share delete access.
     handle = kernel.CreateFileW(str(path), 0x80 if directory else 0x80000000,
-                                0 if directory else 3, None, 3,
+                                3, None, 3,
                                 0x00200000 | (0x02000000 if directory else 0), None)
     if handle == ctypes.c_void_p(-1).value:
         code = ctypes.get_last_error()
@@ -42,7 +55,18 @@ def checked_handle(path, *, directory=False):
             raise OSError("Workspace attributes could not be verified.")
         if info.attributes & 0x400 or bool(info.attributes & 0x10) != directory:
             raise ValueError("Unsafe workspace file or directory.")
+        pinned_identity = file_identity(handle) if directory else None
         yield handle
+        if directory:
+            current = kernel.CreateFileW(str(path), 0x80, 3, None, 3,
+                                         0x00200000 | 0x02000000, None)
+            if current == ctypes.c_void_p(-1).value:
+                raise OSError("Workspace directory changed during access.")
+            try:
+                if file_identity(current) != pinned_identity:
+                    raise OSError("Workspace directory changed during access.")
+            finally:
+                kernel.CloseHandle(current)
     finally:
         kernel.CloseHandle(handle)
 

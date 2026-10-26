@@ -31,10 +31,11 @@ def test_windows_hardlink_not_overwritten(tmp_path):
     assert original.read_text() == "private-settings-placeholder"
 
 
-def test_windows_directory_pin_prevents_rename(tmp_path):
+def test_windows_directory_pin_detects_rename(tmp_path):
     from grader.windows_files import checked_handle
     directory = tmp_path / "config"
     directory.mkdir()
-    with checked_handle(directory, directory=True):
-        with pytest.raises(OSError):
+    with pytest.raises(OSError):
+        with checked_handle(directory, directory=True):
             directory.rename(tmp_path / "moved")
+            directory.mkdir()  # A replacement path must not pass the identity check.
