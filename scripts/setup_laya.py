@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = "convaiinnovations/laya-multilingual"
 REVISION = "1720e3e3357cfe1e281542e223f8273b0890ca34"
 FILES = ["README.md", "config.json", "rl_agent_config.json", "encoder/config.json", "model.safetensors", "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"]
-DEPENDENCIES = ["laya==0.4.3", "torch==2.14.0", "transformers==5.17.0", "huggingface_hub==1.33.0", "safetensors==0.8.0", "numpy==2.5.3"]
+REQUIREMENTS = ROOT / "requirements-laya.txt"
 EXPECTED_SHA256 = {
     "model.safetensors": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
     "tokenizer/tokenizer.json": "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f",
@@ -31,7 +31,7 @@ def main() -> None:
     if args.install_deps:
         if args.offline:
             parser.error("--offline cannot be combined with --install-deps.")
-        subprocess.run([sys.executable, "-m", "pip", "install", *DEPENDENCIES], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)], check=True)
     # Setup is deliberately a different process from the app. It never imports
     # the grader or reads submissions, rubrics, or stored grades.
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"

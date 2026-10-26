@@ -25,7 +25,7 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -49,3 +49,37 @@ jobs:
           tests/test_d3_portability.py
       - name: Test browser workflow with synthetic fixtures
         run: node tests/frontend.cjs
+
+  optional-decision-runtime:
+    name: Optional decision runtime (Linux CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      DO_NOT_TRACK: "1"
+      OTEL_SDK_DISABLED: "true"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install CPU PyTorch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+          from grader.dependency_pins import pinned_version
+          torch_version = pinned_version(Path('requirements-candidates.txt'), 'torch')
+          subprocess.run([sys.executable, '-m', 'pip', 'install', f'torch=={torch_version}',
+                          '--index-url', 'https://download.pytorch.org/whl/cpu'], check=True)
+          PY
+      - name: Install optional decision runtime and test dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-laya.txt
+      - name: Test local runtime contracts with synthetic inputs
+        run: python -m pytest -q tests/test_providers.py tests/test_d3_server.py tests/test_d3_portability.py

@@ -34,6 +34,8 @@ On Windows, create the environment with `py -3.12 -m venv .venv` and replace `.v
 
 Tests use synthetic fixtures and mocked inference; no model download is required. Test rubrics are fixtures only and never load as application defaults.
 
+Dependabot checks pinned Python packages and GitHub Actions daily and opens reviewable update PRs. CI tests the portable app and optional decision runtime on those PRs. A dependency audit also checks application, optional model, and maintenance packages on dependency changes and every Monday. These maintenance jobs query public package advisories; they never read submissions or connect grading inference to a remote service. Review and merge update PRs after their checks pass.
+
 ## Publishing this source
 
 Keep model weights, environment files, saved configurations, submissions, and result exports outside version control. The included `.gitignore` covers the standard local directories and export filenames. Review the files selected for a commit before publishing; no runtime data is part of this source distribution.

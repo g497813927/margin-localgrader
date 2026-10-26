@@ -1,0 +1,5 @@
+# Optional Laya runtime. Shared model dependencies have one pin in candidates.
+-r requirements-candidates.txt
+laya==0.4.15
+safetensors==0.8.0
+numpy==2.5.4

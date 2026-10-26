@@ -25,7 +25,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "models/laya-multilingual"
 DEFAULT_ENDPOINT = "http://127.0.0.1:1234/v1/systemone"
-LAYA_VERSION = "0.4.3"
 MAX_CONTEXT = 8192
 _LOCK = threading.RLock()
 _AGENT = None
@@ -108,16 +107,20 @@ def _load_laya(settings: dict):
         from importlib.metadata import version
     except ImportError as exc:
         raise LocalRuntimeError("Laya is not installed. Run .venv/bin/python scripts/setup_laya.py --install-deps before opening student work.") from exc
-    if version("laya") != LAYA_VERSION:
-        raise LocalRuntimeError(f"This app requires laya=={LAYA_VERSION} so its complete-input checks match the inference tokenizer. Run setup_laya.py --install-deps.")
+    from grader.dependency_pins import pinned_version
+    try:
+        expected_version = pinned_version(PROJECT_ROOT / "requirements-laya.txt", "laya")
+    except (OSError, ValueError) as exc:
+        raise LocalRuntimeError("The pinned Laya requirements are missing or invalid. Restore requirements-laya.txt.") from exc
+    if version("laya") != expected_version:
+        raise LocalRuntimeError(f"This app requires laya=={expected_version} so its complete-input checks match the inference tokenizer. Run setup_laya.py --install-deps.")
     config = json.loads((path / "rl_agent_config.json").read_text())
     encoder = json.loads((path / "encoder/config.json").read_text())
     if config.get("encoder") != "jhu-clsp/mmBERT-base" or encoder.get("max_position_embeddings", 0) < MAX_CONTEXT:
         raise LocalInputError("Use the Laya multilingual mmBERT checkpoint with its documented 8192-token context.")
     try:
-        # Laya 0.4.3 does not expose local_files_only. Passing an existing local
-        # directory bypasses snapshot_download entirely, and HF offline flags
-        # prevent all nested tokenizer/config Hub lookups from using a network.
+        # An existing local directory bypasses snapshot_download entirely.
+        # HF offline flags prevent nested tokenizer/config Hub lookups.
         agent = laya.load(str(path), device=None if device == "auto" else device)
     except Exception as exc:
         raise LocalRuntimeError(f"Could not load the local Laya checkpoint ({type(exc).__name__}). Check installed dependencies and checkpoint files.") from exc

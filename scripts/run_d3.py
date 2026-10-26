@@ -119,8 +119,13 @@ def load_runtime(model_dir, device, max_context):
     root = verify_local_sources(model_dir)
     if device not in {"mps", "cpu"} or not 256 <= max_context <= 8192:
         raise ValueError("Unsupported device or context budget.")
-    if version("transformers") != "5.17.0":
-        raise RuntimeError("The pinned runtime requires transformers 5.17.0.")
+    from grader.dependency_pins import pinned_version
+    try:
+        expected_version = pinned_version(ROOT / "requirements-candidates.txt", "transformers")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("The pinned model requirements are missing or invalid.") from exc
+    if version("transformers") != expected_version:
+        raise RuntimeError(f"The pinned runtime requires transformers {expected_version}.")
     import torch
     if device == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS is unavailable; choose CPU explicitly.")
