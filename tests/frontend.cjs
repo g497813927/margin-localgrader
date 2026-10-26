@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
-const original = fs.readFileSync(require('node:path').join(__dirname, '../grader/static/app.js'), 'utf8');
+const original = fs.readFileSync(require('node:path').join(__dirname, '../grader/static/app.js'), 'utf8').replace(/\r\n/g, '\n');
 function setup() {
   const elements = new Map(), windowEvents = new Map();
   class Element {
