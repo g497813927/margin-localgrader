@@ -1,0 +1,2 @@
+# The D3 launcher verifies these exact publisher-source bytes at runtime.
+vendor/d3/*.py text eol=lf

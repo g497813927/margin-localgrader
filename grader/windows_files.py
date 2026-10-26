@@ -25,10 +25,12 @@ def checked_handle(path, *, directory=False):
     class AttributeInfo(ctypes.Structure):
         _fields_ = [("attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
 
-    # Share read/write, but not deletion. This prevents another process replacing
-    # the pinned directory during the subsequent path-based read/atomic replace.
+    # Keep the directory exclusive while path-based settings operations run.
+    # Some Windows filesystems allow a directory rename despite a handle that
+    # shares read/write but denies deletion. File reads still share read/write.
     handle = kernel.CreateFileW(str(path), 0x80 if directory else 0x80000000,
-                                3, None, 3, 0x00200000 | (0x02000000 if directory else 0), None)
+                                0 if directory else 3, None, 3,
+                                0x00200000 | (0x02000000 if directory else 0), None)
     if handle == ctypes.c_void_p(-1).value:
         code = ctypes.get_last_error()
         if code in (2, 3):
