@@ -2,4 +2,4 @@
 -r requirements-candidates.txt
 laya==0.4.27
 safetensors==0.8.0
-numpy==2.5.4
+numpy==2.5.5
